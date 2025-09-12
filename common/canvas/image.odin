@@ -1,7 +1,6 @@
 package canvas
 
 import "core:strings"
-import "core:fmt"
 import stbi "vendor:stb/image"
 import t "common:types"
 
