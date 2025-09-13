@@ -1,5 +1,8 @@
 package raytracer
 
+import "core:os"
+import "core:thread"
+import "core:sync/chan"
 import "core:math"
 import "core:math/rand"
 import "core:math/linalg"
@@ -22,37 +25,25 @@ OFFSET_COEFFICIENT :: 0.05
 // Recursion limit for reflections
 RECURSION_LIMIT :: 3
 
-Camera :: struct {
-	using position: t.Vector3,
-	rotation: quaternion128
+Task_Data :: struct {
+	task_chan: chan.Chan(t.Vector2),
+	scene: ^scene.Scene,
+	target: ^canvas.Canvas
 }
 
-Ambient_Light :: struct{
-	intensity: f32
-}
-Point_Light :: struct {
-	intensity: f32,
-	position: t.Vector3
-}
-Directional_Light :: struct {
-	intensity: f32,
-	direction: t.Vector3
-}
-Light :: union {
-	Ambient_Light,
-	Point_Light,
-	Directional_Light
-}
-
-canvas_to_viewport :: proc(from: t.Vector2) -> t.Vector3 {
-	return {
+canvas_to_viewport :: proc(camera: scene.Camera, from: t.Vector2) -> t.Vector3 {
+	scaled := t.Vector3{
 		f32(from.x) * VIEWPORT_WIDTH/CANVAS_WIDTH,
 		f32(from.y) * VIEWPORT_HEIGHT/CANVAS_HEIGHT,
 		VIEWPORT_DISTANCE
 	}
+	rotated := linalg.quaternion_mul_vector3(camera.rotation, scaled)
+	offset := camera.position + rotated
+
+	return offset
 }
 
-compute_light :: proc(intersection: Intersection, origin_direction: t.Vector3, origin_direction_length: f32, lights: []Light, objects: []scene.Object) -> f32 {
+compute_light :: proc(intersection: Intersection, origin_direction: t.Vector3, origin_direction_length: f32, lights: []scene.Light, objects: []scene.Object) -> f32 {
 	intensity: f32 = 0
 
 	for light in lights {
@@ -60,16 +51,16 @@ compute_light :: proc(intersection: Intersection, origin_direction: t.Vector3, o
 		local_intensity: f32
 
 		switch l in light {
-		case Ambient_Light:
+		case scene.Ambient_Light:
 			intensity += l.intensity
 			continue
-		case Point_Light:
+		case scene.Point_Light:
 			light_vector = l.position - intersection.position
 			light_intersection := intersect_ray(intersection.position, light_vector, objects, OFFSET_COEFFICIENT)
 			if light_intersection.coefficient <= 1 do continue
 
 			local_intensity = l.intensity
-		case Directional_Light:
+		case scene.Directional_Light:
 			light_vector = l.direction
 			light_intersection := intersect_ray(intersection.position, light_vector, objects, OFFSET_COEFFICIENT)
 			if light_intersection.coefficient < max(f32) do continue
@@ -100,7 +91,7 @@ compute_light :: proc(intersection: Intersection, origin_direction: t.Vector3, o
 	return intensity
 }
 
-trace_ray :: proc(origin, direction: t.Vector3, minimum_coefficient: f32, objects: []scene.Object, lights: []Light, level: int) -> t.Color {
+trace_ray :: proc(origin, direction: t.Vector3, minimum_coefficient: f32, objects: []scene.Object, lights: []scene.Light, level: int) -> t.Color {
 	intersection := intersect_ray(origin, direction, objects, minimum_coefficient)
 	if intersection.coefficient == max(f32) do return VOID_COLOR
 
@@ -121,18 +112,20 @@ trace_ray :: proc(origin, direction: t.Vector3, minimum_coefficient: f32, object
 	return color
 }
 
+worker :: proc(task: thread.Task) {
+	data := cast(^Task_Data)task.data
+	scene := data.scene
+
+	for pixel in chan.recv(data.task_chan) {
+		viewport_position := canvas_to_viewport(scene.camera, pixel)
+		direction := viewport_position - scene.camera.position
+		color := trace_ray(scene.camera.position, direction, 1, scene.objects, scene.lights, 1)
+
+		canvas.pixel(data.target, pixel.x, pixel.y, color)
+	}
+}
+
 main :: proc() {
-	target := canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT, OUTPUT_PATH)
-	defer {
-		canvas.flush(target)
-		canvas.destroy(target)
-	}
-
-	camera := Camera {
-		position = {2.5, 0, 1.5},
-		rotation = linalg.quaternion_angle_axis(-math.PI / 4, t.Vector3{0, 1, 0})
-	}
-
 	monkey_mesh := scene.load_obj("assets/monkey.obj")
 	defer delete(monkey_mesh)
 	for &face in monkey_mesh do face.color = {rand.float32(), rand.float32(), rand.float32()}
@@ -150,19 +143,50 @@ main :: proc() {
 		monkey
 	}
 
-	lights := [?]Light{
-		    Ambient_Light{0.2},
-		      Point_Light{0.6, {2, 1, 0}},
-		Directional_Light{0.2, {1, 4, 4}}
+	lights := [?]scene.Light{
+		    scene.Ambient_Light{0.2},
+		      scene.Point_Light{0.6, {2, 1, 0}},
+		scene.Directional_Light{0.2, {1, 4, 4}}
 	}
 
-	for x in (-CANVAS_WIDTH/2)..<(CANVAS_WIDTH/2) {
-		for y in (-CANVAS_HEIGHT/2 + 1)..=(CANVAS_HEIGHT/2) {
-			viewport_position := camera.position + linalg.quaternion_mul_vector3(camera.rotation, canvas_to_viewport(t.Vector2{x, y}))
-			direction := viewport_position - camera.position
-			color := trace_ray(camera.position, direction, 1, objects[:], lights[:], 1)
+	scene := scene.Scene {
+		camera = {
+			position = {2.5, 0, 1.5},
+			rotation = linalg.quaternion_angle_axis(-math.PI / 4, t.Vector3{0, 1, 0})
+		},
+		objects = objects[:],
+		lights = lights[:]
+	}
 
-			canvas.pixel(target, x, y, color)
+	target := canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT, OUTPUT_PATH)
+	defer {
+		canvas.flush(&target)
+		canvas.destroy(&target)
+	}
+
+	// -1 since the main thread is dispatching coordinates
+	worker_count := os.processor_core_count() - 1
+
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, worker_count)
+	defer thread.pool_destroy(&pool)
+
+	task_chan, _ := chan.create(chan.Chan(t.Vector2), context.allocator)
+
+	data := Task_Data {
+		task_chan = task_chan,
+		scene = &scene,
+		target = &target
+	}
+	for _ in 0..<worker_count do thread.pool_add_task(&pool, context.allocator, worker, &data)
+
+	thread.pool_start(&pool)
+	for x in -CANVAS_WIDTH/2..<CANVAS_WIDTH/2 {
+		for y in -CANVAS_HEIGHT/2 + 1..=CANVAS_HEIGHT/2 {
+			chan.send(task_chan, t.Vector2{x, y})
 		}
 	}
+
+	chan.close(task_chan)
+	thread.pool_join(&pool)
 }

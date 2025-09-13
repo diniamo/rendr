@@ -24,7 +24,7 @@ create :: proc(width, height: int, path: string) -> Canvas {
 	return canvas
 }
 
-pixel :: proc(canvas: Canvas, x, y: int, color: t.Color) {
+pixel :: proc(canvas: ^Canvas, x, y: int, color: t.Color) {
 	// From a Cartesian coordinate system
 	// To a top-left origin with the y axis increasing down
 	translated_x := x + canvas.width/2
@@ -37,7 +37,7 @@ pixel :: proc(canvas: Canvas, x, y: int, color: t.Color) {
 	canvas.data[start + 2] = u8(color[2] * 255)
 }
 
-flush :: proc(canvas: Canvas) -> bool {
+flush :: proc(canvas: ^Canvas) -> bool {
 	return stbi.write_png(
 		canvas.path,
 		i32(canvas.width), i32(canvas.height),
@@ -45,7 +45,7 @@ flush :: proc(canvas: Canvas) -> bool {
 	) == 0
 }
 
-destroy :: proc(canvas: Canvas) {
+destroy :: proc(canvas: ^Canvas) {
 	delete(canvas.path)
 	delete(canvas.data)
 }
