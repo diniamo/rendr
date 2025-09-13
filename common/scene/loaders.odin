@@ -5,16 +5,16 @@ import "core:strings"
 import "core:strconv"
 import t "common:types"
 
-load_obj :: proc(path: string) -> Mesh {
+load_obj :: proc(path: string) -> Model {
 	invalid :: #force_inline proc(ok: bool) {
 		if !ok do panic("Invalid .obj file")
 	}
 
-	index :: proc(slice: []$T, index: int) -> T {
+	index :: proc(index, length: int) -> int {
 		if index > 0 {
-			return slice[index - 1]
+			return index - 1
 		} else {
-			return slice[len(slice) + index]
+			return length + index
 		}
 	}
 
@@ -24,9 +24,7 @@ load_obj :: proc(path: string) -> Mesh {
 
 	s := string(data)
 
-	vertecies: [dynamic]t.Vector3
-	defer delete(vertecies)
-	mesh: Mesh
+	model: Model
 	for line in strings.split_lines_iterator(&s) {
 		line := line
 
@@ -52,7 +50,7 @@ load_obj :: proc(path: string) -> Mesh {
 				z /= w
 			}
 
-			append(&vertecies, t.Vector3{x, y, z})
+			append(&model.vertecies, t.Vector3{x, y, z})
 		case "f":
 			part_1, part_2, part_3: string = ---, ---, ---
 			part_1, ok = strings.split_by_byte_iterator(&line, ' '); invalid(ok)
@@ -69,13 +67,19 @@ load_obj :: proc(path: string) -> Mesh {
 			v2, ok = strconv.parse_int(v2_string, 10); invalid(ok)
 			v3, ok = strconv.parse_int(v3_string, 10); invalid(ok)
 
-			append(&mesh, Face{
-				a = index(vertecies[:], v1),
-				b = index(vertecies[:], v2),
-				c = index(vertecies[:], v3)
+			vc := len(model.vertecies)
+			append(&model.faces, Face{
+				a = index(v1, vc),
+				b = index(v2, vc),
+				c = index(v3, vc)
 			})
 		}
 	}
 
-	return mesh
+	return model
+}
+
+delete_model :: proc(model: Model) {
+	delete(model.vertecies)
+	delete(model.faces)
 }

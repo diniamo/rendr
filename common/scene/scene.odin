@@ -2,13 +2,13 @@ package scene
 
 import t "common:types"
 
-Camera :: struct {
-	using position: t.Vector3,
-	rotation: quaternion128
-}
-
 Scene :: struct {
 	camera: Camera,
 	objects: []Object,
 	lights: []Light
+}
+
+Camera :: struct {
+	position: t.Vector3,
+	rotation: matrix[3, 3]f32
 }

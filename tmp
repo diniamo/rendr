@@ -1,0 +1,90 @@
+
+		if clip_a {
+			if clip_b {
+				if clip_c do continue
+
+				draw_wireframe_triangle(target,
+					world_to_canvas(intersect_segment_plane(a, c, plane_a)),
+					world_to_canvas(intersect_segment_plane(b, c, plane_b)),
+					data.canvas_cache[face.c],
+					face.color
+				)
+			} else if clip_c {
+				draw_wireframe_triangle(target,
+					world_to_canvas(intersect_segment_plane(a, b, plane_a)),
+					data.canvas_cache[face.b],
+					world_to_canvas(intersect_segment_plane(c, c, plane_c)),
+					face.color
+				)
+			} else {
+				ab_intersection := intersect_segment_plane(a, b, plane_a)
+				ab_intersection_canvas := world_to_canvas(ab_intersection)
+				ac_intersection := intersect_segment_plane(a, c, plane_a)
+
+				draw_wireframe_triangle(target,
+					ab_intersection_canvas,
+					data.canvas_cache[face.b],
+					data.canvas_cache[face.c],
+					face.color
+				)
+
+				draw_wireframe_triangle(target,
+					ab_intersection_canvas,
+					world_to_canvas(ac_intersection),
+					data.canvas_cache[face.c],
+					face.color
+				)
+			}
+		} else if clip_b {
+			if clip_c {
+				draw_wireframe_triangle(target,
+					data.canvas_cache[face.a],
+					world_to_canvas(intersect_segment_plane(b, a, plane_b)),
+					world_to_canvas(intersect_segment_plane(c, a, plane_c)),
+					face.color
+				)
+			} else {
+				ba_intersection := intersect_segment_plane(b, a, plane_b)
+				ba_intersection_canvas := world_to_canvas(ba_intersection)
+				bc_intersection := intersect_segment_plane(b, c, plane_b)
+
+				draw_wireframe_triangle(target,
+					data.canvas_cache[face.a],
+					ba_intersection_canvas,
+					data.canvas_cache[face.c],
+					face.color
+				)
+
+				draw_wireframe_triangle(target,
+					ba_intersection_canvas,
+					world_to_canvas(bc_intersection),
+					data.canvas_cache[face.c],
+					face.color
+				)
+			}
+		} else if clip_c {
+			ca_intersection := intersect_segment_plane(c, a, plane_c)
+			ca_intersection_canvas := world_to_canvas(ca_intersection)
+			cb_intersection := intersect_segment_plane(c, c, plane_c)
+
+			draw_wireframe_triangle(target,
+				data.canvas_cache[face.a],
+				data.canvas_cache[face.b],
+				ca_intersection_canvas,
+				face.color
+			)
+
+			draw_wireframe_triangle(target,
+				ca_intersection_canvas,
+				world_to_canvas(cb_intersection),
+				data.canvas_cache[face.b],
+				face.color
+			)
+		} else {
+			draw_wireframe_triangle(target,
+				data.canvas_cache[face.a],
+				data.canvas_cache[face.b],
+				data.canvas_cache[face.c],
+				face.color
+			)
+		}
