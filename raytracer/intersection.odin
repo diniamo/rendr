@@ -44,45 +44,31 @@ intersect_sphere :: proc(origin, direction: t.Vector3, sphere: scene.Sphere, min
 }
 
 intersect_face :: proc(origin, direction: t.Vector3, using face: scene.Face, minimum_coefficient: f32) -> Intersection {
+	EPSILON :: 0.000001
+
 	intersection := Intersection{coefficient = max(f32)}
 
-	m := matrix[3, 3]f32{
-		direction.x, -b.x + a.x, -c.x + a.x,
-		direction.y, -b.y + a.y, -c.y + a.y,
-		direction.z, -b.z + a.z, -c.z + a.z
-	}
-	d := linalg.determinant(m)
+	ab := face.b - face.a
+	ac := face.c - face.a
 
-	m_u := matrix[3, 3]f32{
-		direction.x, a.x - origin.x, -c.x + a.x,
-		direction.y, a.y - origin.y, -c.y + a.y,
-		direction.z, a.z - origin.z, -c.z + a.z
-	}
-	d_u := linalg.determinant(m_u)
-	u := d_u / d
-	if u < 0 do return intersection
+	cross_d_ac := linalg.cross(direction, ac)
+	d := linalg.dot(ab, cross_d_ac)
+	if d < EPSILON do return intersection
 
-	m_v := matrix[3, 3]f32{
-		direction.x, -b.x + a.x, a.x - origin.x,
-		direction.y, -b.y + a.y, a.y - origin.y,
-		direction.z, -b.z + a.z, a.z - origin.z
-	}
-	d_v := linalg.determinant(m_v)
-	v := d_v / d
-	if v < 0 || u + v > 1 do return intersection
+	ao := origin - face.a
+	u := linalg.dot(ao, cross_d_ac)
+	if u < 0 || u > 1 do return intersection
 
-	m_t := matrix[3, 3]f32{
-		a.x - origin.x, -b.x + a.x, -c.x + a.x,
-		a.y - origin.y, -b.y + a.y, -c.y + a.y,
-		a.z - origin.z, -b.z + a.z, -c.z + a.z
-	}
-	d_t := linalg.determinant(m_t)
-	t := d_t / d
+	cross_ao_ab := linalg.cross(ao, ab)
+	v := linalg.dot(direction, cross_ao_ab)
+	if v < 0 || u + v > d do return intersection
+
+	t := linalg.dot(ac, cross_ao_ab) / d
 	if t < minimum_coefficient do return intersection
 
 	intersection.coefficient = t
 	intersection.position = origin + t*direction
-	intersection.normal = linalg.normalize(linalg.cross(b - a, c - a))
+	intersection.normal = linalg.normalize(linalg.cross(ab, ac))
 	intersection.material = face.material
 
 	return intersection
