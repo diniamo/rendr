@@ -12,7 +12,7 @@ Intersection :: struct {
 	material: scene.Material
 }
 
-intersect_sphere :: proc(origin, direction: t.Vector3, sphere: scene.Sphere, minimum_coefficient: f32) -> Intersection {
+intersect_sphere :: proc(origin, direction: t.Vector3, minimum_coefficient: f32, sphere: scene.Sphere) -> Intersection {
 	intersection := Intersection{coefficient = max(f32)}
 
 	center_to_origin := origin - sphere.center
@@ -43,19 +43,19 @@ intersect_sphere :: proc(origin, direction: t.Vector3, sphere: scene.Sphere, min
 	return intersection
 }
 
-intersect_face :: proc(origin, direction: t.Vector3, using face: scene.Face, minimum_coefficient: f32) -> Intersection {
+intersect_face :: proc(origin, direction: t.Vector3, minimum_coefficient: f32, a, b, c: t.Vector3, material: scene.Material) -> Intersection {
 	EPSILON :: 0.000001
 
 	intersection := Intersection{coefficient = max(f32)}
 
-	ab := face.b - face.a
-	ac := face.c - face.a
+	ab := b - a
+	ac := c - a
 
 	cross_d_ac := linalg.cross(direction, ac)
 	d := linalg.dot(ab, cross_d_ac)
 	if d < EPSILON do return intersection
 
-	ao := origin - face.a
+	ao := origin - a
 	u := linalg.dot(ao, cross_d_ac)
 	if u < 0 || u > 1 do return intersection
 
@@ -69,28 +69,32 @@ intersect_face :: proc(origin, direction: t.Vector3, using face: scene.Face, min
 	intersection.coefficient = t
 	intersection.position = origin + t*direction
 	intersection.normal = linalg.normalize(linalg.cross(ab, ac))
-	intersection.material = face.material
+	intersection.material = material
 
 	return intersection
 }
 
-intersect_model :: proc(origin, direction: t.Vector3, model: scene.Model, minimum_coefficient: f32) -> Intersection {
+intersect_instance :: proc(origin, direction: t.Vector3, minimum_coefficient: f32, instance: scene.Instance, cache: []t.Vector3) -> Intersection {
 	intersection := Intersection{coefficient = max(f32)}
 
-	for face in model.mesh {
-		face := face
-		face.a = model.position + linalg.quaternion_mul_vector3(model.rotation, face.a)
-		face.b = model.position + linalg.quaternion_mul_vector3(model.rotation, face.b)
-		face.c = model.position + linalg.quaternion_mul_vector3(model.rotation, face.c)
+	for vertex, i in instance.vertecies {
+		cache[i] = scene.transform_apply(instance.transform, vertex)
+	}
 
-		intersection = intersect_face(origin, direction, face, minimum_coefficient)
+	for face, i in instance.faces {
+		intersection = intersect_face(
+			origin, direction, minimum_coefficient,
+			cache[face.a], cache[face.b], cache[face.c],
+			scene.resolve_material(instance.material, i)
+		)
+
 		if intersection.coefficient < max(f32) do break
 	}
 
 	return intersection
 }
 
-intersect_ray :: proc(origin, direction: t.Vector3, objects: []scene.Object, minimum_coefficient: f32) -> Intersection {
+intersect_ray :: proc(origin, direction: t.Vector3, minimum_coefficient: f32, objects: []scene.Object, cache: []t.Vector3) -> Intersection {
 	intersection := Intersection {
 		coefficient = max(f32),
 		material = {color = VOID_COLOR}
@@ -100,8 +104,8 @@ intersect_ray :: proc(origin, direction: t.Vector3, objects: []scene.Object, min
 		local_intersection: Intersection
 
 		switch o in object {
-		case scene.Sphere: local_intersection = intersect_sphere(origin, direction, o, minimum_coefficient)
-		case scene.Model:  local_intersection = intersect_model(origin, direction, o, minimum_coefficient)
+		case scene.Sphere:   local_intersection = intersect_sphere(origin, direction, minimum_coefficient, o)
+		case scene.Instance: local_intersection = intersect_instance(origin, direction, minimum_coefficient, o, cache)
 		}
 
 		if local_intersection.coefficient < intersection.coefficient do intersection = local_intersection

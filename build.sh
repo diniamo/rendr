@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")"
 
 usage() {
-  echo 'Usage: build.sh <build/run/time> raytracer [odin args...]' 1>&2
+  echo 'Usage: build.sh <build/run/time> <raytracer/rasterizer> [odin args...]' 1>&2
   exit 1
 }
 
@@ -13,7 +13,7 @@ command="$1"
 shift
 
 package="$1"
-[ "$package" != "raytracer" ] && usage
+[ "$package" != "raytracer" -a "$package" != "rasterizer" ] && usage
 shift
 
 odin() {
@@ -26,14 +26,20 @@ odin() {
     "$@"
 }
 
+hyperfine() {
+  runs="$1"
+  shift
+
+  temp="$(mktemp)"
+  odin build "$@" -out:"$temp"
+  command hyperfine --runs "$runs" -N "$temp"
+  rm "$temp"
+}
+
 case "$command" in
   build) odin build "$@" ;;
+  time)  hyperfine 1 "$@" ;;
   run)   odin run "$@" ;;
-  time)
-    temp="$(mktemp)"
-    odin build -out:"$temp" "$@"
-    hyperfine --runs 1 -N "$temp"
-    rm "$temp"
-    ;;
+  bench) hyperfine 10 "$@" ;;
   *) fatal "Invalid subcommand: $command" ;;
 esac

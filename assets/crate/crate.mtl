@@ -1,0 +1,14 @@
+# Blender 4.4.3 MTL File: 'None'
+# www.blender.org
+
+newmtl Material.001
+Ka 1.000000 1.000000 1.000000
+Ks 0.122081 0.122081 0.122081
+Ke 0.000000 0.000000 0.000000
+Ni 1.330000
+d 1.000000
+illum 2
+map_Kd crate_color.png
+map_Ns crate_roughness.png
+map_refl crate_metallic.png
+map_Bump -bm 0.600000 crate_normal.png
