@@ -10,27 +10,29 @@ Material :: struct {
 }
 
 Sphere :: struct {
-	using center: t.Vector3,
-	radius: f32,
+	using material: Material,
 
-	using material: Material
+	center: t.Vector3,
+	radius: f32
 }
 
 Face :: struct {
-	a: t.Vector3,
-	b: t.Vector3,
-	c: t.Vector3,
-
-	using material: Material
+	a, an: int,
+	b, bn: int,
+	c, cn: int
 }
-Mesh :: [dynamic]Face
 Model :: struct {
-	using position: t.Vector3,
-	rotation: quaternion128,
-	mesh: Mesh
+	vertecies: [dynamic]t.Vector3,
+	normals: [dynamic]t.Vector3,
+	faces: [dynamic]Face
+}
+Instance :: struct {
+	using transform: Transform,
+	using model: Model,
+	materials: []Material
 }
 
 Object :: union {
 	Sphere,
-	Model
+	Instance
 }
