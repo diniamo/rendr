@@ -12,7 +12,7 @@ import "common:scene"
 
 CANVAS_WIDTH :: 600
 CANVAS_HEIGHT :: 600
-OUTPUT_PATH :: "output.png"
+OUTPUT_PATH :: "raytracer.png"
 
 VIEWPORT_WIDTH :: 1
 VIEWPORT_HEIGHT :: 1
@@ -33,8 +33,8 @@ Task_Data :: struct {
 
 canvas_to_viewport :: proc(camera: scene.Camera, from: t.Vector2) -> t.Vector3 {
 	scaled := t.Vector3{
-		f32(from.x) * VIEWPORT_WIDTH/CANVAS_WIDTH,
-		f32(from.y) * VIEWPORT_HEIGHT/CANVAS_HEIGHT,
+		from.x * VIEWPORT_WIDTH/CANVAS_WIDTH,
+		from.y * VIEWPORT_HEIGHT/CANVAS_HEIGHT,
 		VIEWPORT_DISTANCE
 	}
 	rotated := linalg.quaternion_mul_vector3(camera.rotation, scaled)
@@ -121,7 +121,7 @@ worker :: proc(task: thread.Task) {
 		direction := viewport_position - scene.camera.position
 		color := trace_ray(scene.camera.position, direction, 1, scene.objects, scene.lights, 1)
 
-		canvas.pixel(data.target, pixel.x, pixel.y, color)
+		canvas.pixel(data.target, pixel, color)
 	}
 }
 
