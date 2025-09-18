@@ -183,7 +183,8 @@ main :: proc() {
 	thread.pool_start(&pool)
 	for x in -CANVAS_WIDTH/2..<CANVAS_WIDTH/2 {
 		for y in -CANVAS_HEIGHT/2 + 1..=CANVAS_HEIGHT/2 {
-			chan.send(task_chan, t.Vector2{x, y})
+			chan.send(task_chan, t.Vector2{f32(x), f32(y)})
+			thread.yield()
 		}
 	}
 
