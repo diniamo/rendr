@@ -1,8 +1,10 @@
-with import <nixpkgs> {}; mkShellNoCC {
+with import <nixpkgs> {}; mkShell {
   packages = [
     odin
     ols
-    lldb
+    nnd
     hyperfine
+
+    raylib
   ];
 }

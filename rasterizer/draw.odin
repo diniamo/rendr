@@ -11,7 +11,7 @@ pixel :: proc(target: ^canvas.Canvas, depth_buffer: []f32, point: t.Vector2i, de
 	index := canvas.position_to_index(target, point)
 	// The depth values are actually 1/z, so the comparison is inverted
 	if depth > depth_buffer[index] {
-		canvas.pixel(target, index, color)
+		canvas.pixel_index(target, index, color)
 		depth_buffer[index] = depth
 	}
 }

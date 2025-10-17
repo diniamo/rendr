@@ -2,6 +2,7 @@ package canvas
 
 import "core:fmt"
 import "core:math"
+import "core:math/linalg"
 import "core:strings"
 import "vendor:stb/image"
 import t "common:types"
@@ -57,13 +58,56 @@ pixel_index :: proc(canvas: ^Canvas, index: int, color: t.Color) {
 	for value, i in color do canvas.data[index + i] = u8(value)
 }
 
-pixel_position :: proc(canvas: ^Canvas, point: t.Vector2i, color: t.Color) {
+pixel :: proc(canvas: ^Canvas, point: t.Vector2i, color: t.Color) {
 	pixel_index(canvas, position_to_index(canvas, point), color)
 }
 
-pixel :: proc {
-	pixel_index,
-	pixel_position
+row :: proc(canvas: ^Canvas, y: int, color: t.Color) {
+	y := canvas.height/2 - y
+	for index := y * canvas.stride; index < (y + 1) * canvas.stride; index += CHANNELS {
+		pixel_index(canvas, index, color)
+	}
+}
+
+col :: proc(canvas: ^Canvas, x: int, color: t.Color) {
+	x := x + canvas.width/2
+	for index := CHANNELS * x; index < canvas.height * canvas.stride; index += canvas.stride {
+		pixel_index(canvas, index, color)
+	}
+}
+
+draw_circle :: proc(target: ^Canvas, center: t.Vector2f, radius: int, color: t.Color) {
+	center_round := linalg.array_cast(linalg.round(center), int)
+
+	for x in center_round.x - radius..=center_round.x + radius {
+		for y in center_round.y - radius..=center_round.y + radius {
+			if linalg.distance(center, t.Vector2f{f32(x), f32(y)}) < f32(radius) {
+				pixel(target, {x, y}, color)
+			}
+		}
+	}
+}
+
+draw_line :: proc(target: ^Canvas, p0, p1: t.Vector2f, color: t.Color) {
+	p0, p1 := p0, p1
+	d := p1 - p0
+
+	if math.abs(d.x) > math.abs(d.y) {
+		if p0.x > p1.x do p0, p1 = p1, p0
+
+		m := f32(d.y) / f32(d.x)
+		y := f32(p0.y)
+		for ; p0.x <= p1.x; p0 += {1, m} {
+			pixel(target, linalg.array_cast(linalg.round(p0), int), color)
+		}
+	} else {
+		if p0.y > p1.y do p0, p1 = p1, p0
+
+		m := f32(d.x) / f32(d.y)
+		for ; p0.y <= p1.y; p0 += {m, 1} {
+			pixel(target, linalg.array_cast(linalg.round(p0), int), color)
+		}
+	}
 }
 
 flush :: proc(canvas: ^Canvas) -> bool {
