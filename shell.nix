@@ -5,6 +5,9 @@ with import <nixpkgs> {}; mkShell {
     nnd
     hyperfine
 
-    raylib
+    glfw
+    vulkan-validation-layers
+    glslang
+    renderdoc
   ];
 }

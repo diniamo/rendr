@@ -7,7 +7,7 @@ SPEED_FLAGS="-o:speed -microarch:native $COMMON_FLAGS"
 DEBUG_FLAGS="-debug $COMMON_FLAGS"
 
 usage() {
-  echo 'Usage: build.sh <run/check/debug/time/bench <runs>> <raytracer/rasterizer/text> [odin args...]' 1>&2
+  echo 'Usage: build.sh <run/check/debug/time/bench <runs>> <raytracer/rasterizer/text/gpu> [odin args...]' 1>&2
   exit 1
 }
 
@@ -17,7 +17,7 @@ command="$1"
 shift
 
 package="$1"
-[ "$package" != "raytracer" -a "$package" != "rasterizer" -a "$package" != "text" ] && usage
+[ "$package" != "raytracer" -a "$package" != "rasterizer" -a "$package" != "text" -a "$package" != "gpu" ] && usage
 shift
 
 odin() {
@@ -45,10 +45,12 @@ debug() {
 }
 
 case "$command" in
-  run)   odin run $DEBUG_FLAGS "$@" ;;
-  check) odin check $COMMON_FLAGS "$@" ;;
-  debug) debug "$@" ;;
-  time)  hyperfine 1 "$@" ;;
-  bench) hyperfine "$@" ;;
-  *)     fatal "Invalid subcommand: $command" ;;
+  check)   odin check $COMMON_FLAGS "$@" ;;
+  test)    odin run $DEBUG_FLAGS "$@" ;;
+  run)     odin run $SPEED_FLAGS "$@" ;;
+  debug)   odin build $DEBUG_FLAGS "$@" ;;
+  release) odin build $SPEED_FLAGS "$@" ;;
+  time)    hyperfine 1 "$@" ;;
+  bench)   hyperfine "$@" ;;
+  *)     echo "Invalid subcommand: $command"; usage ;;
 esac
