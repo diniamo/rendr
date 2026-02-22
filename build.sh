@@ -1,56 +1,29 @@
-#!/bin/sh
-set -eu
+#!/bin/bash
+set -euo pipefail
 cd "$(dirname "$0")"
 
-COMMON_FLAGS="-collection:common=common/"
-SPEED_FLAGS="-o:speed -microarch:native $COMMON_FLAGS"
-DEBUG_FLAGS="-debug $COMMON_FLAGS"
-
 usage() {
-  echo 'Usage: build.sh <run/check/debug/time/bench <runs>> <raytracer/rasterizer/text/gpu> [odin args...]' 1>&2
-  exit 1
+	echo "Usage: build.sh <debug/release> <package>"
+	exit 1
 }
 
-[ "$#" -lt 2 ] && usage
+[ $# -lt 2 ] && usage
 
-command="$1"
-shift
+subcommand="$1"
+package="$2"
+shift 2
 
-package="$1"
-[ "$package" != "raytracer" -a "$package" != "rasterizer" -a "$package" != "text" -a "$package" != "gpu" ] && usage
-shift
+options=(
+	-collection:common=common
+    -error-pos-style:unix
+    -out:out
+)
 
-odin() {
-  subcommand="$1"
-  shift
-
-  command odin "$subcommand" "$package" "$@"
-}
-
-hyperfine() {
-  runs="$1"
-  shift
-
-  temp="$(mktemp)"
-  odin build $SPEED_FLAGS "$@" -out:"$temp"
-  command hyperfine --runs "$runs" -N "$temp"
-  rm "$temp"
-}
-
-debug() {
-  temp="$(mktemp)"
-  odin build $DEBUG_FLAGS "$@" -out:"$temp"
-  command nnd "$temp"
-  rm "$temp"
-}
-
-case "$command" in
-  check)   odin check $COMMON_FLAGS "$@" ;;
-  test)    odin run $DEBUG_FLAGS "$@" ;;
-  run)     odin run $SPEED_FLAGS "$@" ;;
-  debug)   odin build $DEBUG_FLAGS "$@" ;;
-  release) odin build $SPEED_FLAGS "$@" ;;
-  time)    hyperfine 1 "$@" ;;
-  bench)   hyperfine "$@" ;;
-  *)     echo "Invalid subcommand: $command"; usage ;;
+case "$subcommand" in
+    debug)   options+=(-debug) ;;
+    release) options+=(-o:speed -microarch:native) ;;
+    *)       usage ;;
 esac
+
+odin build "$package" "${options[@]}" "$@"
+
