@@ -17,9 +17,9 @@ matrix_apply :: proc(m: matrix[4, 4]f32, v: t.Vector3) -> t.Vector3 {
 	return {h.x, h.y, h.z} / h.w
 }
 
-transform_update :: proc(using transform: ^Transform) {
-	combined = position * rotation * scale
-	combined_vector = linalg.transpose(linalg.inverse(combined))
+transform_update :: proc(transform: ^Transform) {
+	transform.combined = transform.position * transform.rotation * transform.scale
+	transform.combined_vector = linalg.transpose(linalg.inverse(transform.combined))
 }
 
 transform_apply :: proc(transform: Transform, point: t.Vector3) -> t.Vector3 {

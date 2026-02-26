@@ -47,8 +47,8 @@ load_ttf :: proc(path: string) -> Font {
 		return (value >> index) & 1 == 1
 	}
 
-	data, ok := os.read_entire_file(path)
-	if !ok do fatal("Failed to read %s", path)
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil do fatal("Failed to read %s: %v", path, err)
 	defer delete(data)
 
 	font: Font
@@ -178,7 +178,7 @@ load_ttf :: proc(path: string) -> Font {
 
 	selected_id: u16be = 0
 	selected_offset: u32be = ---
-	ok = false
+	ok := false
 
 	num_subtables := read(&reader, u16be)
 	for _ in 0..<num_subtables {

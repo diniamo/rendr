@@ -157,7 +157,9 @@ render_instance :: proc(data: ^Render_Data, index: int) {
 		face: scene.Face = ---
 		clip_count: int = ---
 		{
-			using unsorted_face
+			a := unsorted_face.a; at := unsorted_face.at; an := unsorted_face.an
+			b := unsorted_face.b; bt := unsorted_face.bt; bn := unsorted_face.bn
+			c := unsorted_face.c; ct := unsorted_face.ct; cn := unsorted_face.cn
 
 			if clip_a {
 				if clip_b {

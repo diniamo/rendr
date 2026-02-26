@@ -8,7 +8,8 @@ Camera :: struct {
 	inverse_vector: matrix[4, 4]f32
 }
 
-camera_update_inverse :: proc(using camera: ^Camera) {
+camera_update_inverse :: proc(camera: ^Camera) {
+	transform := &camera.transform
 	scale := matrix[4, 4]f32{
 		1/transform.scale[0, 0], 0, 0, 0,
 		0, 1/transform.scale[1, 1], 0, 0,
@@ -23,6 +24,6 @@ camera_update_inverse :: proc(using camera: ^Camera) {
 		0, 0, 0, 1,
 	}
 
-	inverse = scale * rotation * translation
-	inverse_vector = linalg.transpose(linalg.inverse(inverse))
+	camera.inverse = scale * rotation * translation
+	camera.inverse_vector = linalg.transpose(linalg.inverse(camera.inverse))
 }

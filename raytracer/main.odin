@@ -127,7 +127,7 @@ main :: proc() {
 	defer canvas.flush(&target)
 
 	// -1 since the main thread is dispatching coordinates
-	worker_count := os.processor_core_count() - 1
+	worker_count := os.get_processor_core_count() - 1
 
 	pool: thread.Pool
 	thread.pool_init(&pool, context.allocator, worker_count)

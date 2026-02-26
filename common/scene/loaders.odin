@@ -92,8 +92,8 @@ load_obj :: proc(path: string) -> Model {
 		return iv, ivt, ivn
 	}
 
-	data, ok := os.read_entire_file(path)
-	if !ok do fatal("Failed to read %s", path)
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil do fatal("Failed to read %s: %v", path, err)
 	defer delete(data)
 
 	model: Model
@@ -126,14 +126,14 @@ load_obj :: proc(path: string) -> Model {
 			append(&model.faces, f)
 		case "mtllib":
 			directory := filepath.dir(path)
-			mtl_path := filepath.join({directory, tokens[1]})
+			mtl_path, _ := filepath.join({directory, tokens[1]}, context.allocator)
 			defer {
 				delete(directory)
 				delete(mtl_path)
 			}
 
-			mtl_data, ok := os.read_entire_file(mtl_path)
-			if !ok do fatal("Failed to read %s", mtl_path)
+			mtl_data, err := os.read_entire_file(mtl_path, context.allocator)
+			if err != nil do fatal("Failed to read %s: %v", mtl_path, err)
 			defer delete(mtl_data)
 			mtl_string := string(mtl_data)
 
@@ -147,7 +147,7 @@ load_obj :: proc(path: string) -> Model {
 						directory := filepath.dir(mtl_path)
 						defer delete(directory)
 
-						path = filepath.join({directory, path})
+						path, _ = filepath.join({directory, path}, context.allocator)
 						path_alloc = true
 					}
 					c_path := strings.clone_to_cstring(path)
