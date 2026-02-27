@@ -2,54 +2,47 @@ package opengl
 
 import "core:fmt"
 import "core:os"
-import "vendor:glfw"
+import sdl "vendor:sdl3"
 import gl "vendor:OpenGL"
 
 GL_MAJOR :: 3
 GL_MINOR :: 3
 
-WIDTH  :: 800
-HEIGHT :: 600
-
 VERTEX_COUNT :: 3
 
-// Interleaved: position, color, position, ...
 vertecies := [VERTEX_COUNT * 3 * 2]f32{
-	-0.5, -0.5, 0.0,
-	 0.0,  1.0, 0.0,
-
-	 0.5, -0.5, 0.0,
-	 0.0,  0.0, 1.0,
-
-	 0.0,  0.5, 0.0,
-	 1.0,  0.0, 0.0,
+	// position        color
+	-0.5, -0.5, 0.0,   0.0, 1.0, 0.0,
+	 0.5, -0.5, 0.0,   0.0, 0.0, 1.0,
+	 0.0,  0.5, 0.0,   1.0, 0.0, 0.0,
 }
 
 vertex_shader_source:   cstring = #load("shader.vert")
 fragment_shader_source: cstring = #load("shader.frag")
 
 main :: proc() {
-	glfw.SetErrorCallback(proc "c" (_: i32, description: cstring) {
-		context = {}
+	ok := sdl.Init({})
+	if !ok { fatal("Failed to initialize SDL:", sdl.GetError()) }
 
-		fmt.fprintln(os.stderr, "GLFW:", description)
-	})
-	glfw.Init()
+	sdl.GL_SetAttribute(.CONTEXT_MAJOR_VERSION, GL_MAJOR)
+	sdl.GL_SetAttribute(.CONTEXT_MINOR_VERSION, GL_MINOR)
+	sdl.GL_SetAttribute(.CONTEXT_PROFILE_MASK, auto_cast sdl.GLProfile{.CORE})
 
-	glfw.WindowHint(glfw.CONTEXT_VERSION_MAJOR, GL_MAJOR)
-	glfw.WindowHint(glfw.CONTEXT_VERSION_MINOR, GL_MINOR)
-	glfw.WindowHint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+	window := sdl.CreateWindow("OpenGL Renderer", 0, 0, {.OPENGL, .RESIZABLE})
+	if window == nil { fatal("Failed to open window:", sdl.GetError()) }
 
-	window := glfw.CreateWindow(WIDTH, HEIGHT, "OpenGL Renderer", nil, nil)
-	if window == nil { fatal("Failed to open window") }
+	gl_context := sdl.GL_CreateContext(window)
+	if gl_context == nil { fatal("Failed to create OpenGL context:", sdl.GetError()) }
 
-	glfw.MakeContextCurrent(window)
+	sdl.GL_MakeCurrent(window, gl_context)
+
+	// 0  - immediate
+	// 1  - v-sync
+	// -1 - adaptive sync
+	sdl.GL_SetSwapInterval(1)
 
 
-	gl.load_up_to(GL_MAJOR, GL_MINOR, glfw.gl_set_proc_address)
-
-	gl.Viewport(0, 0, WIDTH, HEIGHT)
-	glfw.SetFramebufferSizeCallback(window, resize)
+	gl.load_up_to(GL_MAJOR, GL_MINOR, sdl.gl_set_proc_address)
 
 	vbo: u32 = ---
 	gl.GenBuffers(1, &vbo)
@@ -57,24 +50,7 @@ main :: proc() {
 	gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
 	gl.BufferData(gl.ARRAY_BUFFER, size_of(vertecies), &vertecies, gl.STATIC_DRAW)
 
-	vertex_shader := gl.CreateShader(gl.VERTEX_SHADER)
-	gl.ShaderSource(vertex_shader, 1, &vertex_shader_source, nil)
-	gl.CompileShader(vertex_shader)
-	check_shader_compilation(vertex_shader)
-
-	fragment_shader := gl.CreateShader(gl.FRAGMENT_SHADER)
-	gl.ShaderSource(fragment_shader, 1, &fragment_shader_source, nil)
-	gl.CompileShader(fragment_shader)
-	check_shader_compilation(fragment_shader)
-
-	shader_program := gl.CreateProgram()
-	gl.AttachShader(shader_program, vertex_shader)
-	gl.AttachShader(shader_program, fragment_shader)
-	gl.LinkProgram(shader_program)
-	check_shader_program_linkage(shader_program)
-	gl.DeleteShader(vertex_shader)
-	gl.DeleteShader(fragment_shader)
-
+	shader_program := create_shader_program(&vertex_shader_source, &fragment_shader_source)
 	gl.UseProgram(shader_program)
 
 	vao: u32 = ---
@@ -83,50 +59,76 @@ main :: proc() {
 
 	// Vertex attribute index, value count in attribute, datatype, normalize data, stride (value size), data offset
 	gl.VertexAttribPointer(0, 3, gl.FLOAT, gl.FALSE, 6 * size_of(f32), 0)
-	gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, 6 * size_of(f32), 3 * size_of(f32))
 	gl.EnableVertexAttribArray(0)
+
+	gl.VertexAttribPointer(1, 3, gl.FLOAT, gl.FALSE, 6 * size_of(f32), 3 * size_of(f32))
 	gl.EnableVertexAttribArray(1)
 
 	gl.ClearColor(0, 0, 0, 1)
 
-	for !glfw.WindowShouldClose(window) {
-		glfw.PollEvents()
+	main_loop: for {
+		for event: sdl.Event = ---; sdl.PollEvent(&event); {
+			#partial switch event.type {
+			case .WINDOW_RESIZED:
+				width := event.window.data1
+				height := event.window.data2
+
+				gl.Viewport(0, 0, width, height)
+			case .QUIT, .WINDOW_CLOSE_REQUESTED:
+				break main_loop
+			}
+		}
 
 
 		gl.Clear(gl.COLOR_BUFFER_BIT)
 		gl.DrawArrays(gl.TRIANGLES, 0, VERTEX_COUNT)
 
 
-		glfw.SwapBuffers(window)
+		sdl.GL_SwapWindow(window)
 	}
 }
 
-resize :: proc "c" (window: glfw.WindowHandle, width, height: i32) {
-	gl.Viewport(0, 0, width, height)
-}
+create_shader_program :: proc(vertex_shader_sources, fragment_shader_sources: [^]cstring) -> u32 {
+	create_shader :: proc(type: u32, sources: [^]cstring) -> u32 {
+		shader := gl.CreateShader(type)
+		gl.ShaderSource(shader, 1, sources, nil)
+		gl.CompileShader(shader)
 
-check_shader_compilation :: proc(shader: u32) {
-	ok: b32 = ---
-	gl.GetShaderiv(shader, gl.COMPILE_STATUS, auto_cast &ok)
-	if !ok {
-		info: [512]u8 = ---
-		n: i32 = ---
-		gl.GetShaderInfoLog(shader, len(info), &n, &info[0])
+		ok: b32
+		gl.GetShaderiv(shader, gl.COMPILE_STATUS, auto_cast &ok)
+		if !ok {
+			info: [512]u8 = ---
+			n: i32
+			gl.GetShaderInfoLog(shader, len(info), &n, &info[0])
 
-		fatalf("Failed to compile shader: %s", info[:n])
+			fatalf("Failed to compile shader: %s", info[:n])
+		}
+
+		return shader
 	}
-}
 
-check_shader_program_linkage :: proc(program: u32) {
-	ok: b32 = ---
-	gl.GetProgramiv(program, gl.LINK_STATUS, auto_cast &ok)
+	vertex_shader := create_shader(gl.VERTEX_SHADER, vertex_shader_sources)
+	defer gl.DeleteShader(vertex_shader)
+
+	fragment_shader := create_shader(gl.FRAGMENT_SHADER, fragment_shader_sources)
+	defer gl.DeleteShader(fragment_shader)
+
+	shader_program := gl.CreateProgram()
+	gl.AttachShader(shader_program, vertex_shader)
+	gl.AttachShader(shader_program, fragment_shader)
+	gl.LinkProgram(shader_program)
+
+	ok: b32
+	gl.GetProgramiv(shader_program, gl.LINK_STATUS, auto_cast &ok)
 	if !ok {
 		info: [512]u8 = ---
-		n: i32 = ---
-		gl.GetProgramInfoLog(program, len(info), &n, &info[0])
+		n: i32
+		gl.GetProgramInfoLog(shader_program, len(info), &n, &info[0])
 
 		fatalf("Failed to link shader program: %s", info[:n])
 	}
+
+	return shader_program
 }
 
 fatal :: proc(args: ..any) {
