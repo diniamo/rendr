@@ -1,25 +1,24 @@
 package gpu
 
+import "base:runtime"
+import "core:log"
 import "core:os"
-import "core:fmt"
+import "core:strings"
+import "core:terminal"
+import "core:terminal/ansi"
 import "core:time"
-import "vendor:glfw"
+import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
-WIDTH :: 800
-HEIGHT :: 600
+TITLE             :: "Vulkan Renderer"
 TARGET_FRAME_TIME :: time.Second / 30.0
 
-// This combination is guaranteed to be available everywhere
-color_format := vk.Format.B8G8R8A8_SRGB
-color_space := vk.ColorSpaceKHR.SRGB_NONLINEAR
+// NOTE: this combination is guaranteed to be available everywhere
+@rodata color_format := vk.Format.B8G8R8A8_SRGB
+@rodata color_space  := vk.ColorSpaceKHR.SRGB_NONLINEAR
 
-vertex_shader := #load("vert.spv")
-fragment_shader := #load("frag.spv")
-
-when ODIN_DEBUG {
-	debug_messenger: vk.DebugUtilsMessengerEXT
-}
+@rodata vertex_shader   := #load("vert.spv")
+@rodata fragment_shader := #load("frag.spv")
 
 Queue :: struct {
 	handle: vk.Queue,
@@ -28,262 +27,401 @@ Queue :: struct {
 
 Swapchain :: struct {
 	handle: vk.SwapchainKHR,
-	count: u32,
 	images: [dynamic]vk.Image,
 	views: [dynamic]vk.ImageView,
 	size: vk.Extent2D
 }
 
-Render_State :: struct {
+Window :: struct {
+	handle: ^sdl.Window,
+	surface: vk.SurfaceKHR,
+	queue: Queue,
+	swapchain: Swapchain,
+	image_available: vk.Semaphore
+}
+
+Renderer :: struct {
 	queue: Queue,
 	pool: vk.CommandPool,
 	buffer: vk.CommandBuffer,
 	pipeline: vk.Pipeline,
-	image: vk.Image,
-	image_view: vk.ImageView,
-	image_index: u32,
-	image_available: vk.Semaphore,
-	finished: vk.Semaphore
+	done: vk.Semaphore
 }
 
-Presentation_State :: struct {
-	queue: Queue,
-	surface: vk.SurfaceKHR,
-	swapchain: Swapchain
-}
+instance:        vk.Instance
+physical_device: vk.PhysicalDevice
+device:          vk.Device
 
-State :: struct {
-	instance: vk.Instance,
-	physical_device: vk.PhysicalDevice,
-	device: vk.Device,
+window:    Window
+renderer:  Renderer
 
-	window: glfw.WindowHandle,
-	render: Render_State,
-	presentation: Presentation_State
+
+when ODIN_DEBUG {
+	global_context: runtime.Context
+	debug_messenger: vk.DebugUtilsMessengerEXT
 }
 
 main :: proc() {
-	state: State
+	context.logger = {
+		procedure = proc(data: rawptr, level: log.Level, text: string, options: log.Options, location := #caller_location) {
+			PREFIX_WARNING :: ansi.CSI + ansi.FG_YELLOW + ansi.SGR
+			PREFIX_ERROR   :: ansi.CSI + ansi.FG_RED + ansi.SGR
+			PREFIX_FATAL   :: ansi.CSI + ansi.FG_RED + ";" + ansi.BOLD + ansi.SGR
+			SUFFIX_COLORED :: ansi.CSI + ansi.RESET + ansi.SGR
 
-	init_glfw()
-	defer glfw.Terminate()
+			// NOTE: the temp allocator is (and should be kept) an arena
+			// so the allocation is resized for free when the builder grows
+			builder := strings.builder_make_none(context.temp_allocator)
 
-	init_instance(&state, glfw.GetRequiredInstanceExtensions())
-	defer deinit_instance(&state)
+			color := false
+			if .Terminal_Color in options {
+				#partial switch level {
+					case .Warning: strings.write_string(&builder, PREFIX_WARNING); color = true
+					case .Error:   strings.write_string(&builder, PREFIX_ERROR);   color = true
+					case .Fatal:   strings.write_string(&builder, PREFIX_FATAL);   color = true
+				}
+			}
 
-	create_window(&state)
-	defer destroy_window(&state)
+			strings.write_string(&builder, text)
+			if color { strings.write_string(&builder, SUFFIX_COLORED) }
+			strings.write_byte(&builder, '\n')
 
-	select_device(&state)
-	defer deinit_device(&state)
+			os.write(os.stderr, builder.buf[:])
 
-	create_swapchain(&state, false)
-	defer destroy_swapchain(&state)
+			if level == .Fatal {
+				os.exit(1)
+			}
+		},
+		lowest_level = .Debug when ODIN_DEBUG else .Warning,
+		options = terminal.color_enabled ? {.Terminal_Color} : {}
+	}
 
-	init_render_state(&state)
-	defer deinit_render_state(&state)
+	when ODIN_DEBUG {
+		global_context = context
+	}
 
-	create_pipeline(&state)
-	defer destroy_pipeline(&state)
 
-	last: time.Time
-	for !glfw.WindowShouldClose(state.window) {
+	{
+		ok := sdl.Init({.VIDEO})
+		if !ok { log.fatal("Failed to initialize SDL:", sdl.GetError()) }
+
+		ok = sdl.Vulkan_LoadLibrary(nil)
+		if !ok { log.fatal("Failed to load system Vulkan loader library:", sdl.GetError()) }
+
+		GetInstaceProcAddr := sdl.Vulkan_GetVkGetInstanceProcAddr()
+		if GetInstaceProcAddr == nil { log.fatal("Failed to get the address of vkGetInstanceProcAddr:", sdl.GetError()) }
+		vk.load_proc_addresses_global(rawptr(GetInstaceProcAddr))
+	}
+
+
+	{
+		application_info := vk.ApplicationInfo {
+			sType = .APPLICATION_INFO,
+			apiVersion = vk.API_VERSION_1_3,
+			pApplicationName = TITLE
+		}
+		create_info := vk.InstanceCreateInfo {
+			sType = .INSTANCE_CREATE_INFO,
+			pApplicationInfo = &application_info
+		}
+
+		extension_count: u32 = ---
+		extensions := sdl.Vulkan_GetInstanceExtensions(&extension_count)
+		if extensions == nil { log.fatal("Failed to get instance extensions:", sdl.GetError()) }
+
+		when !ODIN_DEBUG {
+			create_info.ppEnabledExtensionNames = &extensions[0]
+			create_info.enabledExtensionCount = extension_count
+		} else {
+			all_extension_count := extension_count + 1
+			all_extensions := make([]cstring, all_extension_count, context.temp_allocator)
+
+			i: u32 = 0
+			for ; i < extension_count; i += 1 { all_extensions[i] =  extensions[i] }
+			all_extensions[i] = vk.EXT_DEBUG_UTILS_EXTENSION_NAME
+
+			create_info.ppEnabledExtensionNames = &all_extensions[0]
+			create_info.enabledExtensionCount = all_extension_count
+
+			layers := [1]cstring{"VK_LAYER_KHRONOS_validation"}
+			create_info.ppEnabledLayerNames = &layers[0]
+			create_info.enabledLayerCount = 1
+		}
+
+		result := vk.CreateInstance(&create_info, nil, &instance)
+		if result != .SUCCESS { log.fatal("Failed to create Vulkan instance:", result) }
+
+		vk.load_proc_addresses_instance(instance)
+
+		when ODIN_DEBUG {
+			debug_create_info := vk.DebugUtilsMessengerCreateInfoEXT {
+				sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+				messageSeverity = {.WARNING, .ERROR},
+				messageType = {.VALIDATION},
+				pfnUserCallback = proc "c" (severity: vk.DebugUtilsMessageSeverityFlagsEXT, types: vk.DebugUtilsMessageTypeFlagsEXT, data: ^vk.DebugUtilsMessengerCallbackDataEXT, _: rawptr) -> b32 {
+					context = global_context
+
+					switch {
+					case .ERROR in severity: log.error("Vulkan error:", data.pMessage)
+					case .WARNING in severity: log.warn("Vulkan warning:", data.pMessage)
+					}
+
+					return false
+				}
+			}
+
+			result = vk.CreateDebugUtilsMessengerEXT(instance, &debug_create_info, nil, &debug_messenger)
+			if result != .SUCCESS { log.warn("Failed to create Vulkan debug messenger:", result) }
+		}
+	}
+
+
+	{
+		window.handle = sdl.CreateWindow(TITLE, 0, 0, {.VULKAN, .RESIZABLE})
+		if window.handle == nil { log.fatal("Failed to open window:", sdl.GetError()) }
+
+		ok := sdl.Vulkan_CreateSurface(window.handle, instance, nil, &window.surface)
+		if !ok { log.fatal("Failed to create Vulkan surface:", sdl.GetError()) }
+	}
+
+
+	{
+		device_count: u32
+		vk.EnumeratePhysicalDevices(instance, &device_count, nil)
+		if device_count == 0 { log.fatal("No Vulkan device") }
+
+		devices := make([]vk.PhysicalDevice, device_count, context.temp_allocator)
+		vk.EnumeratePhysicalDevices(instance, &device_count, &devices[0])
+
+		device_properties := make([]vk.PhysicalDeviceProperties, device_count, context.temp_allocator)
+		for i in 0..<device_count { vk.GetPhysicalDeviceProperties(devices[i], &device_properties[i]) }
+
+		type_preferences := [?]bit_set[vk.PhysicalDeviceType]{
+			{.DISCRETE_GPU, .VIRTUAL_GPU},
+			{.INTEGRATED_GPU},
+			{.CPU}
+		}
+		found := false
+		outer: for types in type_preferences {
+			for i in 0..<device_count {
+				properties := device_properties[i]
+				if properties.deviceType in types {
+					device := devices[i]
+					if try_device(device, cstring(&properties.deviceName[0])) {
+						physical_device = device
+						found = true
+						break outer
+					}
+				}
+			}
+		}
+		if !found { log.fatal("No suitable device") }
+	}
+
+
+	// NOTE: hopefully the window manager instantly provides the size through currentExtents,
+	// if not, we create the smallest possible swapchain and rely on a resize event.
+	create_swapchain(1, 1)
+
+
+	{
+		pool_create_info := vk.CommandPoolCreateInfo {
+			sType = .COMMAND_POOL_CREATE_INFO,
+			queueFamilyIndex = renderer.queue.family,
+			flags = {.RESET_COMMAND_BUFFER, .TRANSIENT}
+		}
+		vk.CreateCommandPool(device, &pool_create_info, nil, &renderer.pool)
+
+		buffer_allocate_info := vk.CommandBufferAllocateInfo {
+			sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+			level = .PRIMARY,
+			commandPool = renderer.pool,
+			commandBufferCount = 1
+		}
+		vk.AllocateCommandBuffers(device, &buffer_allocate_info, &renderer.buffer)
+
+		semaphore_create_info := vk.SemaphoreCreateInfo{sType = .SEMAPHORE_CREATE_INFO}
+		vk.CreateSemaphore(device, &semaphore_create_info, nil, &window.image_available)
+		vk.CreateSemaphore(device, &semaphore_create_info, nil, &renderer.done)
+	}
+
+
+	{
+		vertex_create_info := vk.ShaderModuleCreateInfo {
+			sType = .SHADER_MODULE_CREATE_INFO,
+			codeSize = len(vertex_shader),
+			pCode = cast(^u32)&vertex_shader[0]
+		}
+		fragment_create_info := vk.ShaderModuleCreateInfo {
+			sType = .SHADER_MODULE_CREATE_INFO,
+			codeSize = len(fragment_shader),
+			pCode = cast(^u32)&fragment_shader[0]
+		}
+		vertex_module: vk.ShaderModule = ---
+		fragment_module: vk.ShaderModule = ---
+		vk.CreateShaderModule(device, &vertex_create_info, nil, &vertex_module)
+		vk.CreateShaderModule(device, &fragment_create_info, nil, &fragment_module)
+		defer {
+			vk.DestroyShaderModule(device, vertex_module, nil)
+			vk.DestroyShaderModule(device, fragment_module, nil)
+		}
+
+		stages := [?]vk.PipelineShaderStageCreateInfo{
+			{
+				sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+				stage = {.VERTEX},
+				module = vertex_module,
+				pName = "main"
+			},
+			{
+				sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+				stage = {.FRAGMENT},
+				module = fragment_module,
+				pName = "main"
+			}
+		}
+
+		vertex_input_state := vk.PipelineVertexInputStateCreateInfo {
+			sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+		}
+		input_assembly_state := vk.PipelineInputAssemblyStateCreateInfo {
+			sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+			topology = .TRIANGLE_LIST
+		}
+		viewport_state := vk.PipelineViewportStateCreateInfo {
+			sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+			viewportCount = 1,
+			scissorCount = 1
+		}
+		rasterization_state := vk.PipelineRasterizationStateCreateInfo {
+			sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+			polygonMode = .FILL,
+			cullMode = {.BACK},
+			frontFace = .COUNTER_CLOCKWISE,
+			lineWidth = 1
+		}
+		multisample_state := vk.PipelineMultisampleStateCreateInfo {
+			sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+			rasterizationSamples = {._1}
+		}
+
+		attachment_blend_state := vk.PipelineColorBlendAttachmentState{colorWriteMask = {.R, .G, .B}}
+		color_blend_state := vk.PipelineColorBlendStateCreateInfo {
+			sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+			attachmentCount = 1,
+			pAttachments = &attachment_blend_state
+		}
+
+		dynamic_states := [?]vk.DynamicState{.VIEWPORT, .SCISSOR}
+		dynamic_state := vk.PipelineDynamicStateCreateInfo {
+			sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+			dynamicStateCount = 2,
+			pDynamicStates = &dynamic_states[0]
+		}
+
+		layout_create_info := vk.PipelineLayoutCreateInfo {
+			sType = .PIPELINE_LAYOUT_CREATE_INFO
+		}
+		layout: vk.PipelineLayout = ---
+		vk.CreatePipelineLayout(device, &layout_create_info, nil, &layout)
+		defer vk.DestroyPipelineLayout(device, layout, nil)
+
+		rendering_create_info := vk.PipelineRenderingCreateInfo {
+			sType = .PIPELINE_RENDERING_CREATE_INFO,
+			colorAttachmentCount = 1,
+			pColorAttachmentFormats = &color_format
+		}
+		pipeline_create_info := vk.GraphicsPipelineCreateInfo {
+			sType = .GRAPHICS_PIPELINE_CREATE_INFO,
+			pNext = &rendering_create_info,
+			stageCount = 2,
+			pStages = &stages[0],
+			pVertexInputState = &vertex_input_state,
+			pInputAssemblyState = &input_assembly_state,
+			pViewportState = &viewport_state,
+			pRasterizationState = &rasterization_state,
+			pMultisampleState = &multisample_state,
+			pColorBlendState = &color_blend_state,
+			pDynamicState = &dynamic_state,
+			layout = layout
+		}
+		vk.CreateGraphicsPipelines(device, 0, 1, &pipeline_create_info, nil, &renderer.pipeline)
+	}
+
+
+	last := time.now()
+	for {
 		free_all(context.temp_allocator)
 
-		glfw.PollEvents()
 
-		acquire_image(&state)
-		render(&state)
-		present(&state)
+		for event: sdl.Event = ---; sdl.PollEvent(&event); {
+			#partial switch event.type {
+			case .WINDOW_RESIZED:
+				create_swapchain(u32(event.window.data1), u32(event.window.data2))
+			case .QUIT, .WINDOW_CLOSE_REQUESTED:
+				return
+			}
+		}
 
-		// TODO: erm this is probably not ideal
-		vk.DeviceWaitIdle(state.device)
+
+		image_index: u32 = ---
+		vk.AcquireNextImageKHR(device, window.swapchain.handle, max(u64), window.image_available, 0, &image_index)
+		render(window.swapchain.images[image_index], window.swapchain.views[image_index])
+		present(image_index)
+
 
 		now := time.now()
-		delta := time.diff(last, now)
-		wait := TARGET_FRAME_TIME - delta
-		if wait > 0 {
-			time.sleep(wait)
-			last = time.time_add(now, wait)
-		} else {
-			last = now
-		}
+		elapsed := time.diff(last, now)
+		last = now
+
+		ms := time.duration_milliseconds(elapsed)
+		log.debugf("%.2f -> %.0f", ms, 1000 / ms)
 	}
 }
 
-fatal :: proc(args: ..any) {
-	fmt.fprintln(os.stderr, ..args)
-	os.exit(1)
-}
-fatalf :: proc(format: string, args: ..any) {
-	fmt.fprintfln(os.stderr, format, ..args)
-	os.exit(1)
-}
-warn :: proc(args: ..any) {
-	fmt.fprintln(os.stderr, ..args)
-}
-warnf :: proc(format: string, args: ..any) {
-	fmt.fprintfln(os.stderr, format, ..args)
-}
+try_device :: proc(physical_device: vk.PhysicalDevice, name: cstring) -> bool {
+	family_count: u32 = ---
+	vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, nil)
 
-init_glfw :: proc() {
-	glfw.SetErrorCallback(proc "c" (_: i32, description: cstring) {
-		// Print functions aren't contextless
-		// But they don't actually use the context...?
-		context = {}
+	families := make([]vk.QueueFamilyProperties, family_count, context.temp_allocator)
+	vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, &families[0])
 
-		fmt.fprintln(os.stderr, "GLFW:", description)
-	})
-
-	glfw.Init()
-}
-
-init_instance :: proc(state: ^State, required_extensions: []cstring) {
-	vk.load_proc_addresses(rawptr(glfw.GetInstanceProcAddress))
-
-	application_info := vk.ApplicationInfo {
-		sType = .APPLICATION_INFO,
-		apiVersion = vk.API_VERSION_1_3,
-		pApplicationName = "Vulkan Renderer"
-	}
-	create_info := vk.InstanceCreateInfo {
-		sType = .INSTANCE_CREATE_INFO,
-		pApplicationInfo = &application_info
-	}
-
-	extra_extensions := [?]cstring{}
-
-	extension_count := u32(len(required_extensions) + len(extra_extensions))
-	when ODIN_DEBUG do extension_count += 1
-	extensions := make([]cstring, extension_count, context.temp_allocator)
-
-	start := 0
-	for extension, i in required_extensions do extensions[start + i] = extension
-	start += len(required_extensions)
-
-	for extension, i in extra_extensions do extensions[start + i] = extension
-	when ODIN_DEBUG do start += len(extra_extensions)
-
-	when ODIN_DEBUG {
-		extensions[start] = vk.EXT_DEBUG_UTILS_EXTENSION_NAME
-
-		layers := [1]cstring{"VK_LAYER_KHRONOS_validation"}
-		create_info.ppEnabledLayerNames = &layers[0]
-		create_info.enabledLayerCount = 1
-	}
-
-	create_info.ppEnabledExtensionNames = &extensions[0]
-	create_info.enabledExtensionCount = extension_count
-
-	result := vk.CreateInstance(&create_info, nil, &state.instance)
-	if result != .SUCCESS do fatal("Failed to create Vulkan instance:", result)
-
-	vk.load_proc_addresses_instance(state.instance)
-
-	when ODIN_DEBUG {
-		debug_create_info := vk.DebugUtilsMessengerCreateInfoEXT {
-			sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-			messageSeverity = {.WARNING, .ERROR},
-			messageType = {.VALIDATION},
-			pfnUserCallback = proc "c" (severity: vk.DebugUtilsMessageSeverityFlagsEXT, types: vk.DebugUtilsMessageTypeFlagsEXT, data: ^vk.DebugUtilsMessengerCallbackDataEXT, _: rawptr) -> b32 {
-				// Print functions aren't contextless
-				// But they don't actually use the context...?
-				context = {}
-
-				switch {
-				case .ERROR in severity:   fmt.fprintln(os.stderr, "Vulkan error:", data.pMessage)
-				case .WARNING in severity: fmt.fprintln(os.stderr, "Vulkan warning:", data.pMessage)
-				}
-
-				return false
-			}
-		};
-
-		result = vk.CreateDebugUtilsMessengerEXT(state.instance, &debug_create_info, nil, &debug_messenger)
-		if result != .SUCCESS do fatal("Failed to create Vulkan debug messenger:", result)
-	}
-}
-
-create_window :: proc(state: ^State) {
-	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-	state.window = glfw.CreateWindow(WIDTH, HEIGHT, "Vulkan Renderer", nil, nil)
-	if state.window == nil do fatal("Failed to open window")
-
-	result := glfw.CreateWindowSurface(state.instance, state.window, nil, &state.presentation.surface)
-	if result != .SUCCESS do fatal("Failed to create surface:", result)
-}
-
-select_device :: proc(state: ^State) {
-	count: u32 = 0
-	vk.EnumeratePhysicalDevices(state.instance, &count, nil)
-	if count == 0 do fatal("No Vulkan device")
-
-	physical_devices := make([]vk.PhysicalDevice, count, context.temp_allocator)
-	vk.EnumeratePhysicalDevices(state.instance, &count, &physical_devices[0])
-
-	found := false
-	for i in 0..<count {
-		state.physical_device = physical_devices[i]
-		if init_device(state) {
-			found = true
-			break
-		}
-	}
-	if !found do fatal("No suitable GPU")
-}
-
-init_device :: proc(state: ^State) -> bool {
-	properties: vk.PhysicalDeviceProperties = ---
-	vk.GetPhysicalDeviceProperties(state.physical_device, &properties)
-
-	#partial switch properties.deviceType {
-	case .DISCRETE_GPU, .INTEGRATED_GPU, .VIRTUAL_GPU:
-		break
-	case:
-		return false
-	}
-
-	count: u32 = ---
-	vk.GetPhysicalDeviceQueueFamilyProperties(state.physical_device, &count, nil)
-
-	families := make([]vk.QueueFamilyProperties, count, context.temp_allocator)
-	vk.GetPhysicalDeviceQueueFamilyProperties(state.physical_device, &count, &families[0])
-
+	// NOTE: if possible, we use the same queue family for rendering and presentation.
+	// In reality, most devices have the first family support both graphics and presentation.
 	found_graphics := false
 	found_presentation := false
 	match := false
-	loop: for i in 0..<count {
+	loop: for i in 0..<family_count {
 		family := &families[i]
 
 		_presentation_support: b32 = false
-		vk.GetPhysicalDeviceSurfaceSupportKHR(state.physical_device, i, state.presentation.surface, &_presentation_support)
+		vk.GetPhysicalDeviceSurfaceSupportKHR(physical_device, i, window.surface, &_presentation_support)
 
 		graphics_support := .GRAPHICS in family.queueFlags
 		presentation_support := bool(_presentation_support)
 
 		switch {
-			case graphics_support:
-				state.render.queue.family = i
-				found_graphics = true
-				fallthrough
-			case presentation_support:
-				state.presentation.queue.family = i
-				found_presentation = true
-				fallthrough
-			case found_graphics && found_presentation:
-				match = true
-				break loop
+		case graphics_support:
+			renderer.queue.family = i
+			found_graphics = true
+			fallthrough
+		case presentation_support:
+			window.queue.family = i
+			found_presentation = true
+			fallthrough
+		case found_graphics && found_presentation:
+			match = true
+			break loop
 		}
 	}
-	if !found_graphics || !found_presentation do return false
+	if !found_graphics || !found_presentation { return false }
 
 	priority: f32 = 1
 	queue_create_infos: [2]vk.DeviceQueueCreateInfo = ---
 	queue_create_info_count: u32 = ---
-
 	queue_create_infos[0] = {
 		sType = .DEVICE_QUEUE_CREATE_INFO,
-		queueFamilyIndex = state.render.queue.family,
+		queueFamilyIndex = renderer.queue.family,
 		queueCount = 1,
 		pQueuePriorities = &priority
 	}
@@ -292,7 +430,7 @@ init_device :: proc(state: ^State) -> bool {
 	} else {
 		queue_create_infos[1] = {
 			sType = .DEVICE_QUEUE_CREATE_INFO,
-			queueFamilyIndex = state.presentation.queue.family,
+			queueFamilyIndex = window.queue.family,
 			queueCount = 1,
 			pQueuePriorities = &priority
 		}
@@ -317,35 +455,41 @@ init_device :: proc(state: ^State) -> bool {
 		ppEnabledExtensionNames = &extensions[0],
 		enabledExtensionCount = len(extensions)
 	}
-	result := vk.CreateDevice(state.physical_device, &device_create_info, nil, &state.device)
+	result := vk.CreateDevice(physical_device, &device_create_info, nil, &device)
 	if result != .SUCCESS {
-		warnf("Failed to create logical device for %s: %s", cstring(&properties.deviceName[0]), result)
+		log.warnf("Failed to create logical device for %s: %s", name, result)
 		return false
 	}
 
-	vk.GetDeviceQueue(state.device, state.render.queue.family, 0, &state.render.queue.handle)
+	vk.GetDeviceQueue(device, renderer.queue.family, 0, &renderer.queue.handle)
 	if match {
-		state.presentation.queue.handle = state.render.queue.handle
+		window.queue.handle = renderer.queue.handle
 	} else {
-		vk.GetDeviceQueue(state.device, state.presentation.queue.family, 0, &state.presentation.queue.handle)
+		vk.GetDeviceQueue(device, window.queue.family, 0, &window.queue.handle)
 	}
 
+	log.info("Device:", name)
 	return true
 }
 
-create_swapchain :: proc(state: ^State, re: bool) {
-	swapchain := &state.presentation.swapchain
+create_swapchain :: proc(width, height: u32) {
+	swapchain := &window.swapchain
 
 	capabilities: vk.SurfaceCapabilitiesKHR = ---
-	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(state.physical_device, state.presentation.surface, &capabilities)
+	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, window.surface, &capabilities)
 
 	image_count := capabilities.minImageCount
-	// re means that we have presented at least once, so the window size should be available
-	swapchain.size = re ? capabilities.currentExtent : {WIDTH, HEIGHT}
+
+	// NOTE: max(u32) means that the window manager is letting us decide the swapchain size.
+	// We will use the window size in that case.
+	swapchain.size = capabilities.currentExtent.width != max(u32) ? capabilities.currentExtent : {
+		clamp(width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+		clamp(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)
+	}
 
 	create_info := vk.SwapchainCreateInfoKHR {
 		sType = .SWAPCHAIN_CREATE_INFO_KHR,
-		surface = state.presentation.surface,
+		surface = window.surface,
 		minImageCount = image_count,
 		imageFormat = color_format,
 		imageColorSpace = color_space,
@@ -354,28 +498,28 @@ create_swapchain :: proc(state: ^State, re: bool) {
 		imageUsage = {.COLOR_ATTACHMENT, .TRANSFER_DST},
 		preTransform = capabilities.currentTransform,
 		compositeAlpha = {.OPAQUE},
-		presentMode = .FIFO, // V-Sync, guaranteed to be available
-		oldSwapchain = re ? swapchain.handle : 0
+		// NOTE: FIFO = V-Sync, and it's guaranteed to be available
+		presentMode = .FIFO,
+		// NOTE: if this is the first swapchain, this will be 0, which is ignored
+		oldSwapchain = swapchain.handle
 	}
-	vk.CreateSwapchainKHR(state.device, &create_info, nil, &swapchain.handle)
+	vk.CreateSwapchainKHR(device, &create_info, nil, &swapchain.handle)
 
-	if re {
-		for view in swapchain.views {
-			vk.DestroyImageView(state.device, view, nil)
-		}
-
-		// According to spec, the old swapchain is "retired" and we "can" destroy it
-		vk.DestroySwapchainKHR(state.device, create_info.oldSwapchain, nil)
+	// NOTE: according to spec, the old swapchain is "retired" and we "can" destroy it
+	if create_info.oldSwapchain != vk.SwapchainKHR(0) {
+		vk.DestroySwapchainKHR(device, create_info.oldSwapchain, nil)
 	}
 
-	vk.GetSwapchainImagesKHR(state.device, swapchain.handle, &image_count, nil)
-	if image_count != swapchain.count {
+	for view in swapchain.views {
+		vk.DestroyImageView(device, view, nil)
+	}
+
+	vk.GetSwapchainImagesKHR(device, swapchain.handle, &image_count, nil)
+	if image_count != u32(len(swapchain.images)) {
 		resize(&swapchain.images, image_count)
-		resize(&swapchain.views, image_count)
-
-		swapchain.count = image_count
+		resize(&swapchain.views,  image_count)
 	}
-	vk.GetSwapchainImagesKHR(state.device, swapchain.handle, &image_count, &swapchain.images[0])
+	vk.GetSwapchainImagesKHR(device, swapchain.handle, &image_count, &swapchain.images[0])
 
 	view_create_info := vk.ImageViewCreateInfo {
 		sType = .IMAGE_VIEW_CREATE_INFO,
@@ -389,153 +533,18 @@ create_swapchain :: proc(state: ^State, re: bool) {
 	}
 	for i in 0..<image_count {
 		view_create_info.image = swapchain.images[i]
-		vk.CreateImageView(state.device, &view_create_info, nil, &swapchain.views[i])
+		vk.CreateImageView(device, &view_create_info, nil, &swapchain.views[i])
 	}
 }
 
-init_render_state :: proc(state: ^State) {
-	pool_create_info := vk.CommandPoolCreateInfo {
-		sType = .COMMAND_POOL_CREATE_INFO,
-		queueFamilyIndex = state.render.queue.family,
-		flags = {.RESET_COMMAND_BUFFER, .TRANSIENT}
-	}
-	vk.CreateCommandPool(state.device, &pool_create_info, nil, &state.render.pool)
-
-	buffer_allocate_info := vk.CommandBufferAllocateInfo {
-		sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-		level = .PRIMARY,
-		commandPool = state.render.pool,
-		commandBufferCount = 1
-	}
-	vk.AllocateCommandBuffers(state.device, &buffer_allocate_info, &state.render.buffer)
-
-	semaphore_create_info := vk.SemaphoreCreateInfo{sType = .SEMAPHORE_CREATE_INFO}
-	vk.CreateSemaphore(state.device, &semaphore_create_info, nil, &state.render.image_available)
-	vk.CreateSemaphore(state.device, &semaphore_create_info, nil, &state.render.finished)
-}
-
-create_pipeline :: proc(state: ^State) {
-	vertex_create_info := vk.ShaderModuleCreateInfo {
-		sType = .SHADER_MODULE_CREATE_INFO,
-		codeSize = len(vertex_shader),
-		pCode = cast(^u32)&vertex_shader[0]
-	}
-	fragment_create_info := vk.ShaderModuleCreateInfo {
-		sType = .SHADER_MODULE_CREATE_INFO,
-		codeSize = len(fragment_shader),
-		pCode = cast(^u32)&fragment_shader[0]
-	}
-	vertex_module: vk.ShaderModule = ---
-	fragment_module: vk.ShaderModule = ---
-	vk.CreateShaderModule(state.device, &vertex_create_info, nil, &vertex_module)
-	vk.CreateShaderModule(state.device, &fragment_create_info, nil, &fragment_module)
-	defer {
-		vk.DestroyShaderModule(state.device, vertex_module, nil)
-		vk.DestroyShaderModule(state.device, fragment_module, nil)
-	}
-
-	stages := [?]vk.PipelineShaderStageCreateInfo{
-		{
-			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage = {.VERTEX},
-			module = vertex_module,
-			pName = "main"
-		},
-		{
-			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage = {.FRAGMENT},
-			module = fragment_module,
-			pName = "main"
-		}
-	}
-
-	vertex_input_state := vk.PipelineVertexInputStateCreateInfo {
-		sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
-	}
-	input_assembly_state := vk.PipelineInputAssemblyStateCreateInfo {
-		sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		topology = .TRIANGLE_LIST
-	}
-	viewport_state := vk.PipelineViewportStateCreateInfo {
-		sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-		viewportCount = 1,
-		scissorCount = 1
-	}
-	rasterization_state := vk.PipelineRasterizationStateCreateInfo {
-		sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-		polygonMode = .FILL,
-		cullMode = {.BACK},
-		frontFace = .COUNTER_CLOCKWISE,
-		lineWidth = 1
-	}
-	multisample_state := vk.PipelineMultisampleStateCreateInfo {
-		sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-		rasterizationSamples = {._1}
-	}
-
-	attachment_blend_state := vk.PipelineColorBlendAttachmentState{colorWriteMask = {.R, .G, .B}}
-	color_blend_state := vk.PipelineColorBlendStateCreateInfo {
-		sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-		attachmentCount = 1,
-		pAttachments = &attachment_blend_state
-	}
-
-	dynamic_states := [?]vk.DynamicState{.VIEWPORT, .SCISSOR}
-	dynamic_state := vk.PipelineDynamicStateCreateInfo {
-		sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		dynamicStateCount = 2,
-		pDynamicStates = &dynamic_states[0]
-	}
-
-	layout_create_info := vk.PipelineLayoutCreateInfo {
-		sType = .PIPELINE_LAYOUT_CREATE_INFO
-	}
-	layout: vk.PipelineLayout = ---
-	vk.CreatePipelineLayout(state.device, &layout_create_info, nil, &layout)
-	defer vk.DestroyPipelineLayout(state.device, layout, nil)
-
-	rendering_create_info := vk.PipelineRenderingCreateInfo {
-		sType = .PIPELINE_RENDERING_CREATE_INFO,
-		colorAttachmentCount = 1,
-		pColorAttachmentFormats = &color_format
-	}
-	pipeline_create_info := vk.GraphicsPipelineCreateInfo {
-		sType = .GRAPHICS_PIPELINE_CREATE_INFO,
-		pNext = &rendering_create_info,
-		stageCount = 2,
-		pStages = &stages[0],
-		pVertexInputState = &vertex_input_state,
-		pInputAssemblyState = &input_assembly_state,
-		pViewportState = &viewport_state,
-		pRasterizationState = &rasterization_state,
-		pMultisampleState = &multisample_state,
-		pColorBlendState = &color_blend_state,
-		pDynamicState = &dynamic_state,
-		layout = layout
-	}
-	vk.CreateGraphicsPipelines(state.device, 0, 1, &pipeline_create_info, nil, &state.render.pipeline)
-}
-
-acquire_image :: proc(state: ^State) -> vk.Result {
-	render := &state.render
-	swapchain := &state.presentation.swapchain
-
-	result := vk.AcquireNextImageKHR(state.device, swapchain.handle, max(u64), render.image_available, 0, &render.image_index)
-	render.image = swapchain.images[render.image_index]
-	render.image_view = swapchain.views[render.image_index]
-
-	return result
-}
-
-render :: proc(state: ^State) {
-	buffer := state.render.buffer
+render :: proc(output: vk.Image, output_view: vk.ImageView) {
+	buffer := renderer.buffer
 
 	command_buffer_begin_info := vk.CommandBufferBeginInfo{sType = .COMMAND_BUFFER_BEGIN_INFO}
 	vk.BeginCommandBuffer(buffer, &command_buffer_begin_info)
 	defer vk.EndCommandBuffer(buffer)
 
-	// TODO: this is not updated on resizes
-	size := state.presentation.swapchain.size
+	size := window.swapchain.size
 	viewport := vk.Viewport {
 		width = f32(size.width),
 		height = f32(size.height),
@@ -559,9 +568,9 @@ render :: proc(state: ^State) {
 		dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
 		oldLayout = .UNDEFINED,
 		newLayout = .COLOR_ATTACHMENT_OPTIMAL,
-		srcQueueFamilyIndex = state.presentation.queue.family,
-		dstQueueFamilyIndex = state.render.queue.family,
-		image = state.render.image,
+		srcQueueFamilyIndex = window.queue.family,
+		dstQueueFamilyIndex = renderer.queue.family,
+		image = output,
 		subresourceRange = subresource_range
 	}
 	to_draw := vk.DependencyInfo {
@@ -577,9 +586,9 @@ render :: proc(state: ^State) {
 		dstAccessMask = {.MEMORY_READ},
 		oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
 		newLayout = .PRESENT_SRC_KHR,
-		srcQueueFamilyIndex = state.render.queue.family,
-		dstQueueFamilyIndex = state.presentation.queue.family,
-		image = state.render.image,
+		srcQueueFamilyIndex = renderer.queue.family,
+		dstQueueFamilyIndex = window.queue.family,
+		image = output,
 		subresourceRange = subresource_range,
 	}
 	draw_to_present := vk.DependencyInfo {
@@ -592,7 +601,7 @@ render :: proc(state: ^State) {
 
 	output_attachment := vk.RenderingAttachmentInfo{
 		sType = .RENDERING_ATTACHMENT_INFO,
-		imageView = state.render.image_view,
+		imageView = output_view,
 		imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
 		loadOp = .CLEAR,
 		storeOp = .STORE,
@@ -600,7 +609,7 @@ render :: proc(state: ^State) {
 	}
 	rendering_info := vk.RenderingInfo {
 		sType = .RENDERING_INFO,
-		renderArea = {extent = state.presentation.swapchain.size},
+		renderArea = {extent = window.swapchain.size},
 		layerCount = 1,
 		colorAttachmentCount = 1,
 		pColorAttachments = &output_attachment
@@ -608,67 +617,37 @@ render :: proc(state: ^State) {
 	vk.CmdBeginRendering(buffer, &rendering_info)
 	defer vk.CmdEndRendering(buffer)
 
-	vk.CmdBindPipeline(buffer, .GRAPHICS, state.render.pipeline)
+	vk.CmdBindPipeline(buffer, .GRAPHICS, renderer.pipeline)
 	vk.CmdDraw(buffer, 3, 1, 0, 0)
 }
 
-present :: proc(state: ^State) -> vk.Result {
+present :: proc(index: u32) {
+	index := index
+
 	stage_mask := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
 	submit_info := vk.SubmitInfo {
 		sType = .SUBMIT_INFO,
 		waitSemaphoreCount = 1,
-		pWaitSemaphores = &state.render.image_available,
+		pWaitSemaphores = &window.image_available,
 		pWaitDstStageMask = &stage_mask,
 		commandBufferCount = 1,
-		pCommandBuffers = &state.render.buffer,
+		pCommandBuffers = &renderer.buffer,
 		signalSemaphoreCount = 1,
-		pSignalSemaphores = &state.render.finished
+		pSignalSemaphores = &renderer.done
 	}
 
 	present_info := vk.PresentInfoKHR {
 		sType = .PRESENT_INFO_KHR,
 		waitSemaphoreCount = 1,
-		pWaitSemaphores = &state.render.finished,
+		pWaitSemaphores = &renderer.done,
 		swapchainCount = 1,
-		pSwapchains = &state.presentation.swapchain.handle,
-		pImageIndices = &state.render.image_index
+		pSwapchains = &window.swapchain.handle,
+		pImageIndices = &index
 	}
 
-	vk.QueueSubmit(state.render.queue.handle, 1, &submit_info, 0)
-	return vk.QueuePresentKHR(state.presentation.queue.handle, &present_info)
-}
+	vk.QueueSubmit(renderer.queue.handle, 1, &submit_info, 0)
+	vk.QueuePresentKHR(window.queue.handle, &present_info)
 
-destroy_window :: proc(state: ^State) {
-	vk.DestroySurfaceKHR(state.instance, state.presentation.surface, nil)
-	glfw.DestroyWindow(state.window)
-}
-
-deinit_instance :: proc(state: ^State) {
-	when ODIN_DEBUG do vk.DestroyDebugUtilsMessengerEXT(state.instance, debug_messenger, nil)
-	vk.DestroyInstance(state.instance, nil)
-}
-
-deinit_device :: proc(state: ^State) {
-	vk.DestroyDevice(state.device, nil)
-}
-
-destroy_swapchain :: proc(state: ^State) {
-	presentation := &state.presentation
-
-	for view in presentation.swapchain.views {
-		vk.DestroyImageView(state.device, view, nil)
-	}
-	delete(presentation.swapchain.images)
-	vk.DestroySwapchainKHR(state.device, presentation.swapchain.handle, nil)
-}
-
-deinit_render_state :: proc(state: ^State) {
-	vk.DestroySemaphore(state.device, state.render.image_available, nil)
-	vk.DestroySemaphore(state.device, state.render.finished, nil)
-
-	vk.DestroyCommandPool(state.device, state.render.pool, nil)
-}
-
-destroy_pipeline :: proc(state: ^State) {
-	vk.DestroyPipeline(state.device, state.render.pipeline, nil)
+	// NOTE: acts as V-Sync with the FIFO present mode
+	vk.QueueWaitIdle(window.queue.handle)
 }
