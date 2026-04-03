@@ -15,8 +15,8 @@ shift 2
 
 options=(
 	-collection:common=common
-    -error-pos-style:unix
-    -out:out
+	-error-pos-style:unix
+	-out:out
 )
 
 case "$subcommand" in

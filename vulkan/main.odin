@@ -1,6 +1,6 @@
 package gpu
 
-import "base:runtime"
+import "base:intrinsics"
 import "core:log"
 import "core:os"
 import "core:strings"
@@ -10,15 +10,16 @@ import "core:time"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
-TITLE             :: "Vulkan Renderer"
-TARGET_FRAME_TIME :: time.Second / 30.0
+import "vma"
+
+TITLE :: "Vulkan Renderer"
 
 // NOTE: this combination is guaranteed to be available everywhere
 @rodata color_format := vk.Format.B8G8R8A8_SRGB
 @rodata color_space  := vk.ColorSpaceKHR.SRGB_NONLINEAR
 
-@rodata vertex_shader   := #load("vert.spv")
-@rodata fragment_shader := #load("frag.spv")
+@rodata vertex_shader   := #load("shader.vert.spv")
+@rodata fragment_shader := #load("shader.frag.spv")
 
 Queue :: struct {
 	handle: vk.Queue,
@@ -45,16 +46,33 @@ Renderer :: struct {
 	pool: vk.CommandPool,
 	buffer: vk.CommandBuffer,
 	pipeline: vk.Pipeline,
-	done: vk.Semaphore
+	done: vk.Semaphore,
+}
+
+Buffer :: struct {
+	handle: vk.Buffer,
+	allocation: vma.Allocation
+}
+
+Vertex :: struct {
+	position: [2]f32,
+	color: [3]f32
 }
 
 instance:        vk.Instance
 physical_device: vk.PhysicalDevice
 device:          vk.Device
+gpu_allocator:   vma.Allocator
 
 window:    Window
 renderer:  Renderer
 
+@rodata vertecies := [?]Vertex{
+	{{0, -0.5},   {1, 0, 0}},
+	{{-0.5, 0.5}, {0, 1, 0}},
+	{{0.5, 0.5},  {0, 0, 1}}
+}
+vertex_buffer: Buffer
 
 when ODIN_DEBUG {
 	global_context: runtime.Context
@@ -62,6 +80,7 @@ when ODIN_DEBUG {
 }
 
 main :: proc() {
+	// NOTE: context setup
 	context.logger = {
 		procedure = proc(data: rawptr, level: log.Level, text: string, options: log.Options, location := #caller_location) {
 			PREFIX_WARNING :: ansi.CSI + ansi.FG_YELLOW + ansi.SGR
@@ -101,6 +120,7 @@ main :: proc() {
 	}
 
 
+	// NOTE: SDL setup
 	{
 		ok := sdl.Init({.VIDEO})
 		if !ok { log.fatal("Failed to initialize SDL:", sdl.GetError()) }
@@ -114,6 +134,7 @@ main :: proc() {
 	}
 
 
+	// NOTE: instance creation
 	{
 		application_info := vk.ApplicationInfo {
 			sType = .APPLICATION_INFO,
@@ -176,6 +197,7 @@ main :: proc() {
 	}
 
 
+	// NOTE: window creation
 	{
 		window.handle = sdl.CreateWindow(TITLE, 0, 0, {.VULKAN, .RESIZABLE})
 		if window.handle == nil { log.fatal("Failed to open window:", sdl.GetError()) }
@@ -185,6 +207,7 @@ main :: proc() {
 	}
 
 
+	// NOTE: device selection
 	{
 		device_count: u32
 		vk.EnumeratePhysicalDevices(instance, &device_count, nil)
@@ -219,11 +242,49 @@ main :: proc() {
 	}
 
 
+	// NOTE: VMA setup
+	{
+		vulkan_functions := vma.VulkanFunctions {
+			GetPhysicalDeviceProperties           = vk.GetPhysicalDeviceProperties,
+			GetPhysicalDeviceMemoryProperties     = vk.GetPhysicalDeviceMemoryProperties,
+			AllocateMemory                        = vk.AllocateMemory,
+			FreeMemory                            = vk.FreeMemory,
+			MapMemory                             = vk.MapMemory,
+			UnmapMemory                           = vk.UnmapMemory,
+			FlushMappedMemoryRanges               = vk.FlushMappedMemoryRanges,
+			InvalidateMappedMemoryRanges          = vk.InvalidateMappedMemoryRanges,
+			BindBufferMemory                      = vk.BindBufferMemory,
+			BindImageMemory                       = vk.BindImageMemory,
+			GetBufferMemoryRequirements           = vk.GetBufferMemoryRequirements,
+			GetImageMemoryRequirements            = vk.GetImageMemoryRequirements,
+			CreateBuffer                          = vk.CreateBuffer,
+			DestroyBuffer                         = vk.DestroyBuffer,
+			CreateImage                           = vk.CreateImage,
+			DestroyImage                          = vk.DestroyImage,
+			CmdCopyBuffer                         = vk.CmdCopyBuffer,
+			GetBufferMemoryRequirements2KHR       = vk.GetBufferMemoryRequirements2KHR,
+			GetImageMemoryRequirements2KHR        = vk.GetImageMemoryRequirements2KHR,
+			BindBufferMemory2KHR                  = vk.BindBufferMemory2KHR,
+			BindImageMemory2KHR                   = vk.BindImageMemory2KHR,
+			GetPhysicalDeviceMemoryProperties2KHR = vk.GetPhysicalDeviceMemoryProperties2KHR
+		}
+		allocator_create_info := vma.AllocatorCreateInfo {
+			physicalDevice = physical_device,
+			device = device,
+			instance = instance,
+			pVulkanFunctions = &vulkan_functions
+		}
+		vma.CreateAllocator(&allocator_create_info, &gpu_allocator)
+	}
+
+
+	// NOTE: swapchain creation
 	// NOTE: hopefully the window manager instantly provides the size through currentExtents,
 	// if not, we create the smallest possible swapchain and rely on a resize event.
 	create_swapchain(1, 1)
 
 
+	// NOTE: rendering resource creation
 	{
 		pool_create_info := vk.CommandPoolCreateInfo {
 			sType = .COMMAND_POOL_CREATE_INFO,
@@ -240,12 +301,33 @@ main :: proc() {
 		}
 		vk.AllocateCommandBuffers(device, &buffer_allocate_info, &renderer.buffer)
 
+
 		semaphore_create_info := vk.SemaphoreCreateInfo{sType = .SEMAPHORE_CREATE_INFO}
 		vk.CreateSemaphore(device, &semaphore_create_info, nil, &window.image_available)
 		vk.CreateSemaphore(device, &semaphore_create_info, nil, &renderer.done)
+
+
+		buffer_create_info := vk.BufferCreateInfo {
+			sType = .BUFFER_CREATE_INFO,
+			size = size_of(vertecies),
+			usage = {.VERTEX_BUFFER}
+		}
+		allocation_create_info := vma.AllocationCreateInfo {
+			flags = {.MAPPED, .HOST_ACCESS_SEQUENTIAL_WRITE},
+			usage = .AUTO
+		}
+		allocation_info: vma.AllocationInfo = ---
+		vma.CreateBuffer(gpu_allocator, &buffer_create_info, &allocation_create_info, &vertex_buffer.handle, &vertex_buffer.allocation, &allocation_info)
+
+		data: rawptr
+		vma.MapMemory(gpu_allocator, vertex_buffer.allocation, &data)
+		defer vma.UnmapMemory(gpu_allocator, vertex_buffer.allocation)
+
+		intrinsics.mem_copy(data, &vertecies[0], size_of(vertecies))
 	}
 
 
+	// NOTE: pipeline creation
 	{
 		vertex_create_info := vk.ShaderModuleCreateInfo {
 			sType = .SHADER_MODULE_CREATE_INFO,
@@ -281,8 +363,24 @@ main :: proc() {
 			}
 		}
 
+
+		vertex_binding_description := vk.VertexInputBindingDescription {
+			binding = 0,
+			stride = size_of(Vertex),
+			inputRate = .VERTEX
+		}
+		// NOTE: the binding fields here to which vertex buffer binding the data comes from,
+		// not the binding you would specify for textures in shader code
+		vertex_attribute_descriptions := [?]vk.VertexInputAttributeDescription{
+			{ binding = 0, location = 0, format = .R32G32B32_SFLOAT, offset = 0 },
+			{ binding = 0, location = 1, format = .R32G32B32_SFLOAT, offset = auto_cast offset_of(Vertex, color) }
+		}
 		vertex_input_state := vk.PipelineVertexInputStateCreateInfo {
-			sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+			sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+			vertexBindingDescriptionCount = 1,
+			pVertexBindingDescriptions = &vertex_binding_description,
+			vertexAttributeDescriptionCount = len(vertex_attribute_descriptions),
+			pVertexAttributeDescriptions = &vertex_attribute_descriptions[0]
 		}
 		input_assembly_state := vk.PipelineInputAssemblyStateCreateInfo {
 			sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -618,7 +716,11 @@ render :: proc(output: vk.Image, output_view: vk.ImageView) {
 	defer vk.CmdEndRendering(buffer)
 
 	vk.CmdBindPipeline(buffer, .GRAPHICS, renderer.pipeline)
-	vk.CmdDraw(buffer, 3, 1, 0, 0)
+
+	offset: vk.DeviceSize = 0
+	vk.CmdBindVertexBuffers(buffer, 0, 1, &vertex_buffer.handle, &offset)
+
+	vk.CmdDraw(buffer, len(vertecies), 1, 0, 0)
 }
 
 present :: proc(index: u32) {
