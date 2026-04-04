@@ -1,5 +1,6 @@
 package gpu
 
+import "base:runtime"
 import "base:intrinsics"
 import "core:log"
 import "core:os"
@@ -372,7 +373,7 @@ main :: proc() {
 		// NOTE: the binding fields here to which vertex buffer binding the data comes from,
 		// not the binding you would specify for textures in shader code
 		vertex_attribute_descriptions := [?]vk.VertexInputAttributeDescription{
-			{ binding = 0, location = 0, format = .R32G32B32_SFLOAT, offset = 0 },
+			{ binding = 0, location = 0, format = .R32G32_SFLOAT,    offset = 0 },
 			{ binding = 0, location = 1, format = .R32G32B32_SFLOAT, offset = auto_cast offset_of(Vertex, color) }
 		}
 		vertex_input_state := vk.PipelineVertexInputStateCreateInfo {
@@ -403,7 +404,9 @@ main :: proc() {
 			rasterizationSamples = {._1}
 		}
 
-		attachment_blend_state := vk.PipelineColorBlendAttachmentState{colorWriteMask = {.R, .G, .B}}
+		attachment_blend_state := vk.PipelineColorBlendAttachmentState{
+			colorWriteMask = {.R, .G, .B, .A}
+		}
 		color_blend_state := vk.PipelineColorBlendStateCreateInfo {
 			sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
 			attachmentCount = 1,
@@ -484,56 +487,16 @@ try_device :: proc(physical_device: vk.PhysicalDevice, name: cstring) -> bool {
 	families := make([]vk.QueueFamilyProperties, family_count, context.temp_allocator)
 	vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, &families[0])
 
-	// NOTE: if possible, we use the same queue family for rendering and presentation.
-	// In reality, most devices have the first family support both graphics and presentation.
-	found_graphics := false
-	found_presentation := false
-	match := false
-	loop: for i in 0..<family_count {
-		family := &families[i]
+	presentation_support := make([]bool, family_count, context.temp_allocator)
+	for i in 0..<family_count {
+		support: b32 = ---
+		vk.GetPhysicalDeviceSurfaceSupportKHR(physical_device, i, window.surface, &support)
 
-		_presentation_support: b32 = false
-		vk.GetPhysicalDeviceSurfaceSupportKHR(physical_device, i, window.surface, &_presentation_support)
-
-		graphics_support := .GRAPHICS in family.queueFlags
-		presentation_support := bool(_presentation_support)
-
-		switch {
-		case graphics_support:
-			renderer.queue.family = i
-			found_graphics = true
-			fallthrough
-		case presentation_support:
-			window.queue.family = i
-			found_presentation = true
-			fallthrough
-		case found_graphics && found_presentation:
-			match = true
-			break loop
-		}
+		presentation_support[i] = bool(support)
 	}
-	if !found_graphics || !found_presentation { return false }
 
 	priority: f32 = 1
 	queue_create_infos: [2]vk.DeviceQueueCreateInfo = ---
-	queue_create_info_count: u32 = ---
-	queue_create_infos[0] = {
-		sType = .DEVICE_QUEUE_CREATE_INFO,
-		queueFamilyIndex = renderer.queue.family,
-		queueCount = 1,
-		pQueuePriorities = &priority
-	}
-	if match {
-		queue_create_info_count = 1
-	} else {
-		queue_create_infos[1] = {
-			sType = .DEVICE_QUEUE_CREATE_INFO,
-			queueFamilyIndex = window.queue.family,
-			queueCount = 1,
-			pQueuePriorities = &priority
-		}
-		queue_create_info_count = 2
-	}
 
 	extensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 	features12 := vk.PhysicalDeviceVulkan12Features {
@@ -549,10 +512,61 @@ try_device :: proc(physical_device: vk.PhysicalDevice, name: cstring) -> bool {
 		sType = .DEVICE_CREATE_INFO,
 		pNext = &features13,
 		pQueueCreateInfos = &queue_create_infos[0],
-		queueCreateInfoCount = queue_create_info_count,
 		ppEnabledExtensionNames = &extensions[0],
 		enabledExtensionCount = len(extensions)
 	}
+
+	// NOTE: if possible, we use the same queue family for rendering and presentation.
+	// In reality, most devices have the first family support both graphics and presentation.
+	found_universal := false
+	for i in 0..<family_count {
+		graphics := .GRAPHICS in families[i].queueFlags
+		presentation := presentation_support[i]
+
+		if graphics && presentation {
+			renderer.queue.family = i
+			window.queue.family = i
+			found_universal = true
+			break
+		}
+	}
+	if found_universal {
+		queue_create_infos[0] = {
+			sType = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = renderer.queue.family,
+			queueCount = 1,
+			pQueuePriorities = &priority
+		}
+		device_create_info.queueCreateInfoCount = 1
+	} else {
+		for i in 0..<family_count {
+			if .GRAPHICS in families[i].queueFlags {
+				renderer.queue.family = i
+				break
+			}
+		}
+		for i in 0..<family_count {
+			if presentation_support[i] {
+				window.queue.family = i
+				break
+			}
+		}
+
+		queue_create_infos[0] = {
+			sType = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = renderer.queue.family,
+			queueCount = 1,
+			pQueuePriorities = &priority
+		}
+		queue_create_infos[0] = {
+			sType = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = renderer.queue.family,
+			queueCount = 1,
+			pQueuePriorities = &priority
+		}
+		device_create_info.queueCreateInfoCount = 2
+	}
+
 	result := vk.CreateDevice(physical_device, &device_create_info, nil, &device)
 	if result != .SUCCESS {
 		log.warnf("Failed to create logical device for %s: %s", name, result)
@@ -560,7 +574,7 @@ try_device :: proc(physical_device: vk.PhysicalDevice, name: cstring) -> bool {
 	}
 
 	vk.GetDeviceQueue(device, renderer.queue.family, 0, &renderer.queue.handle)
-	if match {
+	if found_universal {
 		window.queue.handle = renderer.queue.handle
 	} else {
 		vk.GetDeviceQueue(device, window.queue.family, 0, &window.queue.handle)
