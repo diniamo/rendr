@@ -16,12 +16,13 @@ shift 2
 options=(
 	-collection:common=common
 	-error-pos-style:unix
+	-microarch:native
 	-out:out
 )
 
 case "$subcommand" in
     debug)   options+=(-debug) ;;
-    release) options+=(-o:speed -microarch:native) ;;
+    release) options+=(-o:speed -disable-assert -no-bounds-check) ;;
     *)       usage ;;
 esac
 

@@ -1,195 +1,239 @@
 package text
 
 import "core:slice"
-import "core:fmt"
-import "core:os"
-import t "common:types"
+import "core:log"
 
-Point :: struct {
-	position: t.Vector2f,
-	on_curve: bool,
-	index: f32
-}
+Contour :: [][2]f32
 Glyph :: struct {
-	points: []Point,
-	end_indecies: []int,
-	min, max: t.Vector2f
+	contours: []Contour,
+	min, max: [2]f32
 }
 Font :: struct {
 	glyphs: []Glyph,
-	units_per_em: int,
-	character_map: map[rune]int
+	units_per_em: f32,
+	offsets: map[rune]int
 }
 
-load_ttf :: proc(path: string) -> Font {
-	fatal :: proc(format: string, args: ..any) {
-		fmt.fprintfln(os.stderr, format, ..args)
-		os.exit(1)
-	}
-
+parse_ttf :: proc(data: []byte) -> Font {
 	Reader :: struct {
 		data: []byte,
-		position: u32be
+		position: int
 	}
 	read :: proc(reader: ^Reader, $T: typeid) -> T {
 		value := slice.to_type(reader.data[reader.position:], T)
 		reader.position += size_of(T)
 		return value
 	}
-	read_bytes :: proc(reader: ^Reader, $N: u32be) -> [N]byte {
-		bytes: [N]byte = ---
-		for i in 0..<N do bytes[i] = reader.data[reader.position + i]
-		reader.position += N
-		return bytes
-	}
 
 	check_bit :: proc(value: $T, index: u8) -> bool {
 		return (value >> index) & 1 == 1
 	}
 
-	data, err := os.read_entire_file(path, context.allocator)
-	if err != nil do fatal("Failed to read %s: %v", path, err)
-	defer delete(data)
-
 	font: Font
 	reader := Reader{data, 0}
 
 	reader.position += 4 // scalerType
-	num_tables := read(&reader, u16be)
-	reader.position += 3 * 2 // Rest of the offset subtable
+	table_count := int(read(&reader, u16be))
+	reader.position += 3 * 2 // rest of the offset subtable
 
-	tables: map[[4]byte]u32be
-	for _ in 0..<num_tables {
-		tag := read_bytes(&reader, 4)
+	tables: struct{head, maxp, glyf, loca, cmap: int} = ---
+	for _ in 0..<table_count {
+		tag := read(&reader, [4]byte)
 		reader.position += 4 // checksum
-		tables[tag] = read(&reader, u32be)
+
+		offset := int(read(&reader, u32be))
+		switch tag {
+		case "head": tables.head = offset
+		case "maxp": tables.maxp = offset
+		case "glyf": tables.glyf = offset
+		case "loca": tables.loca = offset
+		case "cmap": tables.cmap = offset
+		}
+
 		reader.position += 4 // length
 	}
 
-	reader.position = tables["head"]
-	reader.position += 18 // To unitsPerEm
-	font.units_per_em = int(read(&reader, u16be))
-	reader.position += 30 // To indexToLocFormat
-	index_to_offset_format := read(&reader, i16be)
+	// head table
+	reader.position = tables.head
+	reader.position += 18 // to unitsPerEm
+	font.units_per_em = f32(read(&reader, u16be))
+	reader.position += 30 // to indexToLocFormat
+	index_to_offset_format := int(read(&reader, i16be))
 
-	reader.position = tables["maxp"]
+	// maxp table
+	reader.position = tables.maxp
 	reader.position += 4 // version
-	num_glyphs := read(&reader, u16be)
+	glyph_count := int(read(&reader, u16be))
 
-	glyph_table_offset := tables["glyf"]
-	glyph_locations := make([]u32be, num_glyphs)
-	defer delete(glyph_locations)
+	// loca table
+	reader.position = tables.loca
 
-	reader.position = tables["loca"]
-	for i in 0..<num_glyphs {
-		offset: u32be = ---
-		switch index_to_offset_format {
-		case 0: offset = 2 * u32be(read(&reader, u16be))
-		case 1: offset = read(&reader, u32be)
-		}
-
-		glyph_locations[i] = glyph_table_offset + offset
+	glyph_locations := make([]int, glyph_count, context.temp_allocator)
+	switch index_to_offset_format {
+	case 0: for &location in glyph_locations { location = tables.glyf + 2 * int(read(&reader, u16be)) }
+	case 1: for &location in glyph_locations { location = tables.glyf + int(read(&reader, u32be)) }
 	}
 
-	font.glyphs = make([]Glyph, num_glyphs)
-	for i in 0..<num_glyphs {
-		reader.position = glyph_locations[i]
+	font.glyphs = make([]Glyph, glyph_count)
+	for i in 0..<glyph_count {
 		glyph := &font.glyphs[i]
+		reader.position = glyph_locations[i]
 
-		num_contours := read(&reader, i16be)
+		contour_count := int(read(&reader, i16be))
 		// TODO: load compound glyphs
-		// (=0 is a simple glyph, but we don't need to do anything in that case)
-		if num_contours <= 0 do continue
+		if contour_count <= 0 { continue }
+		glyph.contours = make([]Contour, contour_count)
 
 		glyph.min = {f32(read(&reader, i16be)), f32(read(&reader, i16be))}
 		glyph.max = {f32(read(&reader, i16be)), f32(read(&reader, i16be))}
 
-		glyph.end_indecies = make([]int, num_contours)
-		for j in 0..<num_contours do glyph.end_indecies[j] = int(read(&reader, u16be))
+		end_indecies := make([]int, contour_count, context.temp_allocator)
+		for j in 0..<contour_count { end_indecies[j] = int(read(&reader, u16be)) }
 
-		instruction_length := read(&reader, u16be)
-		reader.position += u32be(instruction_length) * 1 // instructions
+		instruction_length := int(read(&reader, u16be))
+		reader.position += instruction_length // instructions
 
-		num_points := glyph.end_indecies[num_contours - 1] + 1
-		glyph.points = make([]Point, num_points)
+		Point :: struct {
+			position: [2]f32,
+			flags: u8,
+			on_curve: bool
+		}
+		point_count := int(end_indecies[contour_count - 1] + 1)
+		points := make([]Point, point_count, context.temp_allocator)
 
-		point_flags: [512]u8 = ---
-		point_flag_count := 0
-
-		for j := 0; j < num_points; {
+		for j := 0; j < point_count; {
 			flags := read(&reader, u8)
 
 			repeat_count := 1
-			if check_bit(flags, 3) do repeat_count += int(read(&reader, u8))
+			if check_bit(flags, 3) { repeat_count += int(read(&reader, u8)) }
 
 			for k in j..<j + repeat_count {
-				point_flags[point_flag_count] = flags
-				point_flag_count += 1
-
-				glyph.points[k].on_curve = check_bit(flags, 0)
+				points[k].flags = flags
+				points[k].on_curve = check_bit(flags, 0)
 			}
-			glyph.points[j].index = f32(j)
 			j += repeat_count
 		}
 
-		previous: f32 = 0
-		for j in 0..<num_points {
-			flags := point_flags[j]
-			point := &glyph.points[j]
+		resolve_points :: proc(reader: ^Reader, points: []Point, field_offset: uintptr, bit_offset: u8) {
+			previous: f32 = 0
+			for i in 0..<len(points) {
+				point := &points[i]
 
-			point.position.x = previous
-			if check_bit(flags, 1) {
-				dx := f32(read(&reader, u8))
-				if check_bit(flags, 4) do point.position.x += dx
-				else                   do point.position.x -= dx
-				previous = point.position.x
-			} else {
-				if !check_bit(flags, 4) {
-					dx := f32(read(&reader, i16be))
-					point.position.x += dx
-					previous = point.position.x
+				dx: f32 = 0
+				flag_1 := check_bit(point.flags, 1 + bit_offset)
+				flag_2 := check_bit(point.flags, 4 + bit_offset)
+				if flag_1 {
+					dx = f32(read(reader, u8))
+					if !flag_2 { dx *= -1 }
+				} else {
+					if !flag_2 {
+						dx = f32(read(reader, i16be))
+					}
 				}
+
+				current := previous + dx
+				(cast(^f32)(uintptr(point) + field_offset))^ = current
+				previous = current
 			}
 		}
-		previous = 0
-		for j in 0..<num_points {
-			flags := point_flags[j]
-			point := &glyph.points[j]
+		resolve_points(&reader, points, offset_of(Point, position),                0)
+		resolve_points(&reader, points, offset_of(Point, position) + size_of(f32), 1)
 
-			point.position.y = previous
-			if check_bit(flags, 2) {
-				dy := f32(read(&reader, u8))
-				if check_bit(flags, 5) do point.position.y += dy
-				else                   do point.position.y -= dy
-				previous = point.position.y
-			} else {
-				if !check_bit(flags, 5) {
-					dy := f32(read(&reader, i16be))
-					point.position.y += dy
-					previous = point.position.y
+		a0, a1, a2: ^Point = ---, ---, ---
+		// NOTE: used for implied points
+		p: Point = ---
+
+		start := 0
+		for j in 0..<contour_count {
+			start_next := end_indecies[j] + 1
+			contour_points := points[start:start_next]
+			contour_point_count := start_next - start
+
+			// On-curve points are handled by duplicating the second endpoint
+			// TODO: should we really count them?
+			// More ideal would be writing as many as we want into a virtual memory-based growing arena
+			new_point_count := 0
+			p1 := &contour_points[0]
+			p2 := &contour_points[1]
+			p3 := &contour_points[2]
+			dummy := Point{on_curve = true}
+			for k := 0; k < contour_point_count; {
+				if p2.on_curve {
+					k += 1
+					p1, p2, p3 = p2, p3, &contour_points[(k + 2) % contour_point_count]
+				} else {
+					if p3.on_curve {
+						k += 2
+						p1, p2, p3 = p3, &contour_points[(k + 1) % contour_point_count], &contour_points[(k + 2) % contour_point_count]
+					} else {
+						k += 1
+						p1, p2, p3 = &dummy, p3, &contour_points[(k + 2) % contour_point_count]
+					}
 				}
+
+				new_point_count += 3
 			}
+			new_points := make([][2]f32, new_point_count)
+			glyph.contours[j] = new_points
+
+			p1 = &contour_points[0]
+			p2 = &contour_points[1]
+			p3 = &contour_points[2]
+			a1, a2, a3: ^Point = ---, ---, ---
+			l := 0
+			for k := 0; k < contour_point_count; {
+				if p2.on_curve {
+					a1, a2, a3 = p1, p2, p2
+
+					k += 1
+					p1, p2, p3 = p2, p3, &contour_points[(k + 2) % contour_point_count]
+				} else {
+					if p3.on_curve {
+						a1, a2, a3 = p1, p2, p3
+
+						k += 2
+						p1, p2, p3 = p3, &contour_points[(k + 1) % contour_point_count], &contour_points[(k + 2) % contour_point_count]
+					} else {
+						implied := new(Point, context.temp_allocator)
+						implied.position = (p2.position + p3.position)/2
+						implied.on_curve = true
+
+						a1, a2, a3 = p1, p2, implied
+
+						k += 1
+						p1, p2, p3 = implied, p3, &contour_points[(k + 2) % contour_point_count]
+					}
+				}
+
+				new_points[l]     = a1.position
+				new_points[l + 1] = a2.position
+				new_points[l + 2] = a3.position
+				l += 3
+			}
+			assert(l == new_point_count)
+
+			start = start_next
 		}
 	}
 
-	cmap_offset := tables["cmap"]
-	reader.position = cmap_offset
+	// cmap table
+	reader.position = tables.cmap
 	reader.position += 2 // version
 
-	selected_id: u16be = 0
+	selected_id: u16 = 0
 	selected_offset: u32be = ---
 	ok := false
 
-	num_subtables := read(&reader, u16be)
-	for _ in 0..<num_subtables {
-		id := read(&reader, u16be)
+	subtable_count := u16(read(&reader, u16be))
+	for _ in 0..<subtable_count {
+		id := u16(read(&reader, u16be))
 		if id != 0 {
 			reader.position += 2 // platformSpecificID
 			reader.position += 4 // offset
 			continue
 		}
 
-		id = read(&reader, u16be)
+		id = u16(read(&reader, u16be))
 		if (id == 0 || id == 1 || id == 3 || id == 4) && (!ok || id > selected_id) {
 			selected_id = id
 			selected_offset = read(&reader, u32be)
@@ -199,25 +243,25 @@ load_ttf :: proc(path: string) -> Font {
 		}
 	}
 
-	if !ok do fatal("No unicode character map in %s", path)
+	if !ok { log.fatal("No unicode character map in TTF data") }
 
-	reader.position = cmap_offset + selected_offset
+	reader.position = tables.cmap + int(selected_offset)
 
 	format := read(&reader, u16be)
-	if format != 12 do fatal("Unsupported unicode character map format: %d", format)
+	if format != 12 { log.fatal("Unsupported unicode character map format:", format) }
 
 	reader.position += 2 // reserved
 	reader.position += 4 // length
 	reader.position += 4 // language
 
-	num_groups := read(&reader, u32be)
-	for _ in 0..<num_groups {
-		chr := read(&reader, u32be)
-		end := read(&reader, u32be)
+	group_count := int(read(&reader, u32be))
+	for _ in 0..<group_count {
+		chr := u32(read(&reader, u32be))
+		end := u32(read(&reader, u32be))
 		glyph := int(read(&reader, u32be))
 
 		for chr <= end {
-			font.character_map[rune(chr)] = glyph
+			font.offsets[rune(chr)] = glyph
 			chr += 1
 			glyph += 1
 		}
@@ -227,6 +271,10 @@ load_ttf :: proc(path: string) -> Font {
 }
 
 delete_font :: proc(font: Font) {
+	for glyph in font.glyphs {
+		for contour in glyph.contours { delete(contour) }
+		delete(glyph.contours)
+	}
 	delete(font.glyphs)
-	delete(font.character_map)
+	delete(font.offsets)
 }

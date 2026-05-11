@@ -1,189 +1,261 @@
 package text
 
-import "core:slice"
 import "core:math"
 import "core:math/linalg"
-import t "common:types"
+import "core:slice"
 import "common:canvas"
+import "common:logger"
 
 CANVAS_WIDTH :: 600
 CANVAS_HEIGHT :: 600
 
-FONT_FILE :: "assets/InterVariable.ttf"
+FONT_FILE :: "../assets/InterVariable.ttf"
 FONT_SIZE :: 256
-FONT_COLOR :: t.Color{1, 1, 1}
+FONT_COLOR :: [3]f32{1, 1, 1}
+CHARACTER :: '$'
+PER_PIXEL :: false
 
-LETTER :: 'a'
+MAGIC_NUMBER :: 0b0010_1110_0111_0100
+EPSILON :: 1/1024.0
 
-intersect_line :: proc(p0, p1: t.Vector2f, y: f32) -> (f32, bool) {
-	// This avoids double intersections too, since in that case,
-	// one line will have its minimum and the other its maximum
-	// at the intersection point, so only 1 will pass the check.
-	if y <= min(p0.y, p1.y) || y > max(p0.y, p1.y) do return 0, false
+font_data := #load(FONT_FILE)
 
-	d := p1 - p0
-
-	// This would mean that if y == p0.y == p1.y, then there would be
-	// infinite intersections, which doesn't make sense with this algorithm.
-	if d.y == 0 do return 0, false
-
-	x := p0.x + (y - p0.y)*(d.x/d.y)
-	return x, true
+matrix3_mul_vector2 :: proc(m: matrix[3, 3]f32, v: [2]f32) -> [2]f32 {
+	r := m * [3]f32{v.x, v.y, 1}
+	return {r.x, r.y} / r[2]
 }
 
-// This function is not strictly correct becuase of floating-point imprecision
-intersect_bezier :: proc(p0, p1, p2: t.Vector2f, y: f32) -> (x: [2]f32, count: int) {
-	a := p0 - 2*p1 + p2
-	b := 2 * (p1 - p0)
-	cy := p0.y - y
+x_t :: proc(x1, x2, x3, t: f32) -> f32 {
+	c := 1 - t
+	return c*c*x1 + 2*t*c*x2 + t*t*x3
+}
 
-	if a.y == 0 {
-		t := -cy / b.y
-		if t >= 0 && t < 1 {
-			x[0] = t*b.x + p0.x
-			count = 1
+per_pixel :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
+	shoot_ray :: proc(contours: []Contour, transform: matrix[3,3]f32) -> (int, f32) {
+		winding: int = 0
+		coverage: f32 = 0
+
+		for contour in contours {
+			for i := 0; i < len(contour) - 2; i += 3 {
+				p1 := matrix3_mul_vector2(transform, contour[i])
+				p2 := matrix3_mul_vector2(transform, contour[i + 1])
+				p3 := matrix3_mul_vector2(transform, contour[i + 2])
+
+				amount: uint = (p1.y > 0 ? 0b10 : 0) | (p2.y > 0 ? 0b100 : 0) | (p3.y > 0 ? 0b1000 : 0)
+				result := MAGIC_NUMBER >> amount
+				if (result & 0b11) == 0 { continue }
+
+				a := p1.y - 2*p2.y + p3.y
+				b := p1.y - p2.y
+				c := p1.y
+				t1, t2: f32 = ---, ---
+				if abs(a) < EPSILON {
+					t1 = c/(2*b)
+					t2 = t1
+				} else {
+					sqrt_term := math.sqrt(max(0, b*b - a*c))
+					t1 = (b - sqrt_term) / a
+					t2 = (b + sqrt_term) / a
+				}
+
+				x1 := x_t(p1.x, p2.x, p3.x, t1)
+				x2 := x_t(p1.x, p2.x, p3.x, t2)
+				if (result & 0b1)  != 0 && x1 >= 0 { winding += 1; coverage += math.saturate(x1 + 0.5) }
+				if (result & 0b10) != 0 && x2 >= 0 { winding -= 1; coverage -= math.saturate(x2 + 0.5) }
+			}
 		}
-	} else {
-		determinant := b.y*b.y - 4*a.y*cy
-		switch {
-		case determinant == 0:
-			t := -b.y / (2*a.y)
-			if t >= 0 && t < 1 {
-				x[0] = t*t*a.x + t*b.x + p0.x
-				count = 1
-			}
-		case determinant > 0:
-			sqrt_term := math.sqrt(determinant)
 
-			a2 := 2 * a.y
-			t1 :=  (sqrt_term - b.y) / a2
-			t2 := -(sqrt_term + b.y) / a2
+		return winding, coverage
+	}
 
-			if t1 >= 0 && t1 < 1 {
-				x[0] = t1*t1*a.x + t1*b.x + p0.x
-				count = 1
+	sample :: proc(contours: []Contour, position: [2]f32, to_pixels: f32) -> f32 {
+		transform := matrix[3, 3]f32{
+			to_pixels, 0, -position.x,
+			0, to_pixels, -position.y,
+			0, 0, 1
+		}
+
+		w_right, c_right := shoot_ray(contours, transform)
+		if w_right == 0 { return 0 }
+
+		_, c_up := shoot_ray(contours, {
+			0, 1, 0,
+			-1, 0, 0,
+			0, 0, 1
+		} * transform)
+
+		_, c_left := shoot_ray(contours, {
+			-1, 0, 0,
+			0, -1, 0,
+			0, 0, 1
+		} * transform)
+
+		_, c_down := shoot_ray(contours, {
+			0, -1, 0,
+			1, 0, 0,
+			0, 0, 1
+		} * transform)
+
+		return math.saturate((c_right + c_up + c_left + c_down) / 4)
+	}
+
+	SAMPLES_PER_SIDE :: 4
+	SAMPLE_STEP :: 1.0/SAMPLES_PER_SIDE
+	SAMPLE_COUNT :: SAMPLES_PER_SIDE * SAMPLES_PER_SIDE
+
+	min_floor := linalg.floor(to_pixels * glyph.min)
+	max_ceil := linalg.ceil(to_pixels * glyph.max)
+	for y in min_floor.y..<max_ceil.y {
+		pixel := [2]f32{min_floor.x, y}
+		for ; pixel.x < max_ceil.x; pixel.x += 1 {
+			running_sum: f32 = 0
+
+			top_left_sample := pixel - 0.5 + SAMPLE_STEP/2
+			running_sample := top_left_sample
+			for _ in 0..<SAMPLES_PER_SIDE {
+				for _ in 0..<SAMPLES_PER_SIDE {
+					running_sum += sample(glyph.contours, running_sample, to_pixels)
+					running_sample.x += SAMPLE_STEP
+				}
+
+				running_sample = {top_left_sample.x, running_sample.y + SAMPLE_STEP}
 			}
-			if t2 >= 0 && t2 < 1 {
-				x[count] = t2*t2*a.x + t2*b.x + p0.x
-				count += 1
+
+			intensity := running_sum / SAMPLE_COUNT
+			canvas.pixel(target, linalg.array_cast(pixel, int), intensity * FONT_COLOR)
+		}
+	}
+}
+
+scanline :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
+	Intersection :: struct {
+		x: f32,
+		winding: int
+	}
+
+	shoot_ray :: proc(contours: []Contour, transform: matrix[3,3]f32) -> (intersections: [dynamic; 64]Intersection) {
+		windings: u32
+
+		for contour in contours {
+			for i := 0; i < len(contour) - 2; i += 3 {
+				p1 := matrix3_mul_vector2(transform, contour[i])
+				p2 := matrix3_mul_vector2(transform, contour[i + 1])
+				p3 := matrix3_mul_vector2(transform, contour[i + 2])
+
+				amount: uint = (p1.y > 0 ? 0b10 : 0) | (p2.y > 0 ? 0b100 : 0) | (p3.y > 0 ? 0b1000 : 0)
+				result := MAGIC_NUMBER >> amount
+				if (result & 0b11) == 0 { continue }
+
+				a := p1.y - 2*p2.y + p3.y
+				b := p1.y - p2.y
+				c := p1.y
+				t1, t2: f32 = ---, ---
+				if abs(a) < EPSILON {
+					t1 = c/(2*b)
+					t2 = t1
+				} else {
+					sqrt_term := math.sqrt(max(0, b*b - a*c))
+					t1 = (b - sqrt_term) / a
+					t2 = (b + sqrt_term) / a
+				}
+
+				x1 := x_t(p1.x, p2.x, p3.x, t1)
+				x2 := x_t(p1.x, p2.x, p3.x, t2)
+				if (result & 0b1)  != 0 && x1 >= 0 { append(&intersections, Intersection{x1, 1}) }
+				if (result & 0b10) != 0 && x2 >= 0 { append(&intersections, Intersection{x2, -1}) }
+			}
+		}
+
+		return
+	}
+
+	sample :: proc(contours: []Contour, y: f32, to_pixels: f32, intensities: []f32) {
+		transform := matrix[3, 3]f32{
+			to_pixels, 0, 0,
+			0, to_pixels, -y,
+			0, 0, 1
+		}
+		intersections := shoot_ray(contours, transform)
+		slice.sort_by_key(intersections[:], proc(i: Intersection) -> f32 { return i.x })
+
+		running_winding := 0
+		for i := 0; i < len(intersections); {
+			i1 := intersections[i]
+			i2: Intersection = ---
+
+			running_winding += i1.winding
+			for running_winding != 0 {
+				i += 1
+				i2 = intersections[i]
+				running_winding += i2.winding
+			}
+			i += 1
+
+			x1i := int(i1.x)
+			x2i := int(i2.x)
+			_, f1 := math.modf(i1.x)
+			_, f2 := math.modf(i2.x)
+
+			// TODO: these intensities dont seem correct assuming .0 is the pixel center
+			if f1 > 0.5 {
+				x1i += 1
+				intensities[x1i] += 1.5 - f1
+			} else {
+				intensities[x1i] += 0.5 - f1
+			}
+			for x in x1i+1..<x2i { intensities[x] += 1 }
+			if f2 > 0.5 {
+				intensities[x2i] += 1
+				intensities[x2i + 1] += f2 - 0.5
+			} else {
+				intensities[x2i] += f2 + 0.5
 			}
 		}
 	}
 
-	return
-}
+	SAMPLE_COUNT :: 5
+	SAMPLE_STEP :: 1.0/(SAMPLE_COUNT + 1)
 
-index_wrapped :: proc(slice: []$T, index: int) -> T {
-	return slice[index < len(slice) ? index : index - len(slice)]
+	bottom_left := linalg.array_cast(to_pixels * glyph.min, int)
+	top_right := linalg.array_cast(to_pixels * glyph.max, int)
+	intensities := make([]f32, top_right.x + 1, context.temp_allocator)
+	for y in bottom_left.y..=top_right.y {
+		sy := f32(y) - 0.5
+		for _ in 0..<SAMPLE_COUNT {
+			sy += SAMPLE_STEP
+			sample(glyph.contours, sy, to_pixels, intensities)
+		}
+
+		for x in bottom_left.x..=top_right.x {
+			intensity := intensities[x]
+			if intensity > 0 {
+				intensity /= SAMPLE_COUNT
+				canvas.pixel(target, {x, y}, intensity * FONT_COLOR)
+			}
+		}
+
+		slice.zero(intensities)
+	}
 }
 
 main :: proc() {
+	context.logger = logger.get()
+
 	target := canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT, "text.png")
 	defer canvas.flush(&target)
 
-	font := load_ttf(FONT_FILE)
+	font := parse_ttf(font_data)
+	to_pixels := FONT_SIZE / f32(font.units_per_em)
+	glyph := font.glyphs[font.offsets[CHARACTER]]
 
-	scale := FONT_SIZE / f32(font.units_per_em)
-	for &glyph in font.glyphs {
-		for &point in glyph.points {
-			point.position *= scale
-		}
-
-		glyph.min *= scale
-		glyph.max *= scale
+	when PER_PIXEL {
+		per_pixel(&target, glyph, to_pixels)
+	} else {
+		scanline(&target, glyph, to_pixels)
 	}
 
-	glyph := &font.glyphs[font.character_map[LETTER]]
-
-	for y in int(glyph.min.y)..=int(glyph.max.y) {
-		intersections: [32]f32 = ---
-		intersection_count := 0
-
-		start := 0
-		for end in glyph.end_indecies {
-			next_start := end + 1
-			points := glyph.points[start:next_start]
-			last := end - start
-			start = next_start
-
-			i := 0
-			p0 := points[0]
-			p1 := points[1]
-			p2 := points[2]
-			for {
-				if p1.on_curve {
-					x, ok := intersect_line(p0.position, p1.position, f32(y))
-					if ok {
-						intersections[intersection_count] = x
-						intersection_count += 1
-					}
-
-					i += 1
-					if i > last do break
-
-					p0 = p1
-					p1 = p2
-					p2 = index_wrapped(points, i + 2)
- 				} else {
-					p0p := p0.position
-					p1p := p1.position
-					p2p: t.Vector2f = ---
-					if p2.on_curve {
-						p2p = p2.position
-
-						i += 2
-						if i <= last {
-							p0 = p2
-							p1 = index_wrapped(points, i + 1)
-							p2 = index_wrapped(points, i + 2)
-						}
-					} else {
-						p2p = (p1.position + p2.position) / 2
-
-						i += 1
-						if i <= last {
-							p0 = {p2p, true, f32(i) + 0.5}
-							p1 = p2
-							p2 = index_wrapped(points, i + 2)
-						}
-					}
-
-					x, c := intersect_bezier(p0p, p1p, p2p, f32(y))
-					switch c {
-					case 1:
-						intersections[intersection_count] = x[0]
-						intersection_count += 1
-					case 2:
-						intersections[intersection_count] = x[0]
-						intersections[intersection_count] = x[1]
-						intersection_count += 2
-					}
-
-					if i > last do break
-				}
-			}
-		}
-
-		slice.sort(intersections[:intersection_count])
-
-		for i := 1; i < intersection_count; i += 2 {
-			x0 := intersections[i - 1]
-			x0i := int(x0)
-
-			x1 := intersections[i]
-			x1i := int(x1)
-
-			_, f0 := math.modf(x0)
-			_, f1 := math.modf(x1)
-
-			// This is a naive attempt at anti-aliasing
-			// Doesn't look good for beziers that extend more horizontally than vertically
-			canvas.pixel(&target, {x0i, y}, (1 - f0) * FONT_COLOR)
-			canvas.pixel(&target, {x1i, y}, f1 * FONT_COLOR)
-
-			for x in x0i + 1..=x1i - 1 {
-				canvas.pixel(&target, {x, y}, FONT_COLOR)
-			}
-		}
+	when ODIN_DEBUG {
+		canvas.row(&target, 0, {1, 0, 1})
+		canvas.col(&target, 0, {1, 0, 1})
 	}
 }
