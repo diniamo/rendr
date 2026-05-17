@@ -244,9 +244,12 @@ main :: proc() {
 
 
 	// NOTE: swapchain creation
-	// NOTE: hopefully the window manager instantly provides the size through currentExtents,
-	// if not, we create the smallest possible swapchain and rely on a resize event.
-	create_swapchain(1, 1)
+	// NOTE: on Wayland, SDL has no way of knowing the window size, so we just get 1x1,
+	// which will end up being used as the swapchain size. This wastes a swapchain creation,
+	// since we immediately recreate it the second time through the main loop (after the first commit)
+	width, height: i32 = ---, ---
+	sdl.GetWindowSizeInPixels(window.handle, &width, &height)
+	create_swapchain(u32(width), u32(height))
 
 
 	// NOTE: rendering resource creation
@@ -558,7 +561,7 @@ create_swapchain :: proc(width, height: u32) {
 
 	// NOTE: max(u32) means that the window manager is letting us decide the swapchain size.
 	// We will use the window size in that case.
-	swapchain.size = capabilities.currentExtent.width != max(u32) ? capabilities.currentExtent : {
+	swapchain.size = capabilities.currentExtent != {max(u32), max(u32)} ? capabilities.currentExtent : {
 		clamp(width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
 		clamp(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)
 	}
