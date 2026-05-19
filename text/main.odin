@@ -196,7 +196,6 @@ scanline :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
 			_, f1 := math.modf(i1.x)
 			_, f2 := math.modf(i2.x)
 
-			// TODO: these intensities dont seem correct assuming .0 is the pixel center
 			if f1 > 0.5 {
 				x1i += 1
 				intensities[x1i] += 1.5 - f1
@@ -229,8 +228,7 @@ scanline :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
 		for x in bottom_left.x..=top_right.x {
 			intensity := intensities[x]
 			if intensity > 0 {
-				intensity /= SAMPLE_COUNT
-				canvas.pixel(target, {x, y}, intensity * FONT_COLOR)
+				canvas.pixel(target, {x, y}, intensity/SAMPLE_COUNT * FONT_COLOR)
 			}
 		}
 
