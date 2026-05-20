@@ -325,7 +325,7 @@ main :: proc() {
 			0, 0, 0, 1
 		},
 
-		canvas = canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT, CANVAS_OUTPUT),
+		canvas = canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT),
 		depth_buffer = make([]f32, CANVAS_WIDTH * CANVAS_HEIGHT * canvas.CHANNELS)
 	}
 
@@ -377,5 +377,5 @@ main :: proc() {
 
 	render_scene(&data)
 
-	canvas.flush(&data.canvas)
+	canvas.flush(&data.canvas, CANVAS_OUTPUT)
 }

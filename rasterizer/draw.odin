@@ -8,7 +8,7 @@ import "common:canvas"
 import "common:scene"
 
 pixel :: proc(target: ^canvas.Canvas, depth_buffer: []f32, point: t.Vector2i, depth: f32, color: t.Color) {
-	index := canvas.position_to_index(target, point)
+	index := canvas.middle_to_index(target, point)
 	// The depth values are actually 1/z, so the comparison is inverted
 	if depth > depth_buffer[index] {
 		canvas.pixel_index(target, index, color)

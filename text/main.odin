@@ -3,22 +3,22 @@ package text
 import "core:math"
 import "core:math/linalg"
 import "core:slice"
+import "core:fmt"
 import "common:canvas"
 import "common:logger"
 
-CANVAS_WIDTH :: 600
-CANVAS_HEIGHT :: 600
-
 FONT_FILE :: "../assets/InterVariable.ttf"
-FONT_SIZE :: 256
-FONT_COLOR :: [3]f32{1, 1, 1}
+font_data := #load(FONT_FILE)
+
+FONT_SIZE :: 11
+TEXT_COLOR :: [3]f32{1, 1, 1}
 CHARACTER :: '$'
-PER_PIXEL :: false
+
+PER_PIXEL :: true
+OUTPUT_FILE :: "text.png"
 
 MAGIC_NUMBER :: 0b0010_1110_0111_0100
 EPSILON :: 1/1024.0
-
-font_data := #load(FONT_FILE)
 
 matrix3_mul_vector2 :: proc(m: matrix[3, 3]f32, v: [2]f32) -> [2]f32 {
 	r := m * [3]f32{v.x, v.y, 1}
@@ -30,11 +30,8 @@ x_t :: proc(x1, x2, x3, t: f32) -> f32 {
 	return c*c*x1 + 2*t*c*x2 + t*t*x3
 }
 
-per_pixel :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
-	shoot_ray :: proc(contours: []Contour, transform: matrix[3,3]f32) -> (int, f32) {
-		winding: int = 0
-		coverage: f32 = 0
-
+per_pixel :: proc(target: ^canvas.Canvas, contours: []Contour, size: [2]int, to_pixels: f32) {
+	shoot_ray :: proc(contours: []Contour, transform: matrix[3,3]f32) -> (winding: int, coverage: f32) {
 		for contour in contours {
 			for i := 0; i < len(contour) - 2; i += 3 {
 				p1 := matrix3_mul_vector2(transform, contour[i])
@@ -65,7 +62,7 @@ per_pixel :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
 			}
 		}
 
-		return winding, coverage
+		return
 	}
 
 	sample :: proc(contours: []Contour, position: [2]f32, to_pixels: f32) -> f32 {
@@ -99,50 +96,49 @@ per_pixel :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
 		return math.saturate((c_right + c_up + c_left + c_down) / 4)
 	}
 
-	SAMPLES_PER_SIDE :: 4
+	SAMPLES_PER_SIDE :: 3
 	SAMPLE_STEP :: 1.0/SAMPLES_PER_SIDE
 	SAMPLE_COUNT :: SAMPLES_PER_SIDE * SAMPLES_PER_SIDE
 
-	min_floor := linalg.floor(to_pixels * glyph.min)
-	max_ceil := linalg.ceil(to_pixels * glyph.max)
-	for y in min_floor.y..<max_ceil.y {
-		pixel := [2]f32{min_floor.x, y}
-		for ; pixel.x < max_ceil.x; pixel.x += 1 {
-			running_sum: f32 = 0
+	pixel := [2]int{0, 0}
+	for {
+		for ; pixel.x < size.x; pixel.x += 1 {
+			sample_sum: f32 = 0
 
-			top_left_sample := pixel - 0.5 + SAMPLE_STEP/2
-			running_sample := top_left_sample
+			first := linalg.array_cast(pixel, f32) - 0.5 + 0.5*SAMPLE_STEP
+			subpixel := first
 			for _ in 0..<SAMPLES_PER_SIDE {
 				for _ in 0..<SAMPLES_PER_SIDE {
-					running_sum += sample(glyph.contours, running_sample, to_pixels)
-					running_sample.x += SAMPLE_STEP
+					sample_sum += sample(contours, subpixel, to_pixels)
+					subpixel.x += SAMPLE_STEP
 				}
 
-				running_sample = {top_left_sample.x, running_sample.y + SAMPLE_STEP}
+				subpixel = {first.x, subpixel.y + SAMPLE_STEP}
 			}
 
-			intensity := running_sum / SAMPLE_COUNT
-			canvas.pixel(target, linalg.array_cast(pixel, int), intensity * FONT_COLOR)
+			intensity := sample_sum / SAMPLE_COUNT
+			canvas.pixel_bottom_left(target, pixel, intensity * TEXT_COLOR)
 		}
+
+		pixel = {0, pixel.y + 1}
+		if pixel.y >= size.y { break }
 	}
 }
 
-scanline :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
+scanline :: proc(target: ^canvas.Canvas, contours: []Contour, size: [2]int, to_pixels: f32) {
 	Intersection :: struct {
 		x: f32,
 		winding: int
 	}
 
-	shoot_ray :: proc(contours: []Contour, transform: matrix[3,3]f32) -> (intersections: [dynamic; 64]Intersection) {
-		windings: u32
-
+	shoot_ray :: proc(contours: []Contour, transform: matrix[3,3]f32) -> (intersections: [dynamic; MAX_INTERSECTIONS]Intersection) {
 		for contour in contours {
 			for i := 0; i < len(contour) - 2; i += 3 {
 				p1 := matrix3_mul_vector2(transform, contour[i])
 				p2 := matrix3_mul_vector2(transform, contour[i + 1])
 				p3 := matrix3_mul_vector2(transform, contour[i + 2])
 
-				amount: uint = (p1.y > 0 ? 0b10 : 0) | (p2.y > 0 ? 0b100 : 0) | (p3.y > 0 ? 0b1000 : 0)
+				amount: u8 = (p1.y > 0 ? 0b10 : 0) | (p2.y > 0 ? 0b100 : 0) | (p3.y > 0 ? 0b1000 : 0)
 				result := MAGIC_NUMBER >> amount
 				if (result & 0b11) == 0 { continue }
 
@@ -212,23 +208,22 @@ scanline :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
 		}
 	}
 
-	SAMPLE_COUNT :: 5
+	MAX_INTERSECTIONS :: 64
+	SAMPLE_COUNT :: 4
 	SAMPLE_STEP :: 1.0/(SAMPLE_COUNT + 1)
 
-	bottom_left := linalg.array_cast(to_pixels * glyph.min, int)
-	top_right := linalg.array_cast(to_pixels * glyph.max, int)
-	intensities := make([]f32, top_right.x + 1, context.temp_allocator)
-	for y in bottom_left.y..=top_right.y {
+	intensities := make([]f32, size.x, context.temp_allocator)
+	for y in 0..<size.y {
 		sy := f32(y) - 0.5
 		for _ in 0..<SAMPLE_COUNT {
 			sy += SAMPLE_STEP
-			sample(glyph.contours, sy, to_pixels, intensities)
+			sample(contours, sy, to_pixels, intensities)
 		}
 
-		for x in bottom_left.x..=top_right.x {
+		for x in 0..<size.x {
 			intensity := intensities[x]
 			if intensity > 0 {
-				canvas.pixel(target, {x, y}, intensity/SAMPLE_COUNT * FONT_COLOR)
+				canvas.pixel_bottom_left(target, {x, y}, intensity/SAMPLE_COUNT * TEXT_COLOR)
 			}
 		}
 
@@ -239,21 +234,18 @@ scanline :: proc(target: ^canvas.Canvas, glyph: Glyph, to_pixels: f32) {
 main :: proc() {
 	context.logger = logger.get()
 
-	target := canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT, "text.png")
-	defer canvas.flush(&target)
-
 	font := parse_ttf(font_data)
 	to_pixels := FONT_SIZE / f32(font.units_per_em)
+
 	glyph := font.glyphs[font.offsets[CHARACTER]]
+	size := linalg.array_cast(to_pixels*glyph.size + 1, int)
+
+	target := canvas.create(size.x, size.y)
+	defer canvas.flush(&target, OUTPUT_FILE)
 
 	when PER_PIXEL {
-		per_pixel(&target, glyph, to_pixels)
+		per_pixel(&target, glyph.contours, size, to_pixels)
 	} else {
-		scanline(&target, glyph, to_pixels)
-	}
-
-	when ODIN_DEBUG {
-		canvas.row(&target, 0, {1, 0, 1})
-		canvas.col(&target, 0, {1, 0, 1})
+		scanline(&target, glyph.contours, size, to_pixels)
 	}
 }

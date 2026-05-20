@@ -1,26 +1,33 @@
 package text
 
-import "core:slice"
+import "base:intrinsics"
 import "core:log"
+import "core:fmt"
+import "core:math/linalg"
 
 Contour :: [][2]f32
 Glyph :: struct {
 	contours: []Contour,
-	min, max: [2]f32
+	size: [2]f32
 }
 Font :: struct {
 	glyphs: []Glyph,
 	units_per_em: f32,
+	size: f32,
 	offsets: map[rune]int
 }
 
 parse_ttf :: proc(data: []byte) -> Font {
+	// Special case reader for big endian data
 	Reader :: struct {
 		data: []byte,
 		position: int
 	}
 	read :: proc(reader: ^Reader, $T: typeid) -> T {
-		value := slice.to_type(reader.data[reader.position:], T)
+		value := (cast(^T)(uintptr(raw_data(reader.data)) + uintptr(reader.position)))^
+		when size_of(T) > 1 && intrinsics.type_is_integer(T) && intrinsics.type_is_endian_little(T) {
+			value = intrinsics.byte_swap(value)
+		}
 		reader.position += size_of(T)
 		return value
 	}
@@ -33,8 +40,8 @@ parse_ttf :: proc(data: []byte) -> Font {
 	reader := Reader{data, 0}
 
 	reader.position += 4 // scalerType
-	table_count := int(read(&reader, u16be))
-	reader.position += 3 * 2 // rest of the offset subtable
+	table_count := read(&reader, u16)
+	reader.position += 6 // rest of the offset subtable
 
 	tables: struct{head, maxp, glyf, loca, cmap: int} = ---
 	for _ in 0..<table_count {
@@ -57,8 +64,9 @@ parse_ttf :: proc(data: []byte) -> Font {
 	reader.position = tables.head
 	reader.position += 18 // to unitsPerEm
 	font.units_per_em = f32(read(&reader, u16be))
+	font.size = font.units_per_em
 	reader.position += 30 // to indexToLocFormat
-	index_to_offset_format := int(read(&reader, i16be))
+	index_to_offset_format := read(&reader, i16)
 
 	// maxp table
 	reader.position = tables.maxp
@@ -70,8 +78,8 @@ parse_ttf :: proc(data: []byte) -> Font {
 
 	glyph_locations := make([]int, glyph_count, context.temp_allocator)
 	switch index_to_offset_format {
-	case 0: for &location in glyph_locations { location = tables.glyf + 2 * int(read(&reader, u16be)) }
-	case 1: for &location in glyph_locations { location = tables.glyf + int(read(&reader, u32be)) }
+	case 0: for &location in glyph_locations { location = tables.glyf + 2*int(read(&reader, u16be)) }
+	case 1: for &location in glyph_locations { location = tables.glyf +   int(read(&reader, u32be)) }
 	}
 
 	font.glyphs = make([]Glyph, glyph_count)
@@ -79,13 +87,13 @@ parse_ttf :: proc(data: []byte) -> Font {
 		glyph := &font.glyphs[i]
 		reader.position = glyph_locations[i]
 
-		contour_count := int(read(&reader, i16be))
+		contour_count := read(&reader, i16)
 		// TODO: load compound glyphs
 		if contour_count <= 0 { continue }
 		glyph.contours = make([]Contour, contour_count)
 
-		glyph.min = {f32(read(&reader, i16be)), f32(read(&reader, i16be))}
-		glyph.max = {f32(read(&reader, i16be)), f32(read(&reader, i16be))}
+		origin := [2]i16{read(&reader, i16), read(&reader, i16)}
+		glyph.size = linalg.array_cast([2]i16{read(&reader, i16), read(&reader, i16)} - origin + 1, f32)
 
 		end_indecies := make([]int, contour_count, context.temp_allocator)
 		for j in 0..<contour_count { end_indecies[j] = int(read(&reader, u16be)) }
@@ -94,11 +102,11 @@ parse_ttf :: proc(data: []byte) -> Font {
 		reader.position += instruction_length // instructions
 
 		Point :: struct {
-			position: [2]f32,
+			position: [2]i16,
 			flags: u8,
 			on_curve: bool
 		}
-		point_count := int(end_indecies[contour_count - 1] + 1)
+		point_count := end_indecies[contour_count - 1] + 1
 		points := make([]Point, point_count, context.temp_allocator)
 
 		for j := 0; j < point_count; {
@@ -114,34 +122,34 @@ parse_ttf :: proc(data: []byte) -> Font {
 			j += repeat_count
 		}
 
-		resolve_points :: proc(reader: ^Reader, points: []Point, field_offset: uintptr, bit_offset: u8) {
-			previous: f32 = 0
-			for i in 0..<len(points) {
-				point := &points[i]
+		resolve_points :: proc(reader: ^Reader, start: i16, coordinate: uintptr, flags: uintptr, count: int, bit_offset: u8) {
+			previous   := start
+			coordinate := coordinate
+			flags      := flags
 
-				dx: f32 = 0
-				flag_1 := check_bit(point.flags, 1 + bit_offset)
-				flag_2 := check_bit(point.flags, 4 + bit_offset)
+			for _ in 0..<count {
+				flags_value := (cast(^u8)flags)^
+				flag_1 := check_bit(flags_value, 1 + bit_offset)
+				flag_2 := check_bit(flags_value, 4 + bit_offset)
+
+				delta: i16 = 0
 				if flag_1 {
-					dx = f32(read(reader, u8))
-					if !flag_2 { dx *= -1 }
-				} else {
-					if !flag_2 {
-						dx = f32(read(reader, i16be))
-					}
+					value := i16(read(reader, u8))
+					delta = flag_2 ? value : -value
+				} else if !flag_2 {
+					delta = read(reader, i16)
 				}
 
-				current := previous + dx
-				(cast(^f32)(uintptr(point) + field_offset))^ = current
+				current := previous + delta
+				(cast(^i16)coordinate)^ = current
 				previous = current
+
+				coordinate += size_of(Point)
+				flags      += size_of(Point)
 			}
 		}
-		resolve_points(&reader, points, offset_of(Point, position),                0)
-		resolve_points(&reader, points, offset_of(Point, position) + size_of(f32), 1)
-
-		a0, a1, a2: ^Point = ---, ---, ---
-		// NOTE: used for implied points
-		p: Point = ---
+		resolve_points(&reader, -origin.x, uintptr(&points[0].position.x), uintptr(&points[0].flags), len(points), 0)
+		resolve_points(&reader, -origin.y, uintptr(&points[0].position.y), uintptr(&points[0].flags), len(points), 1)
 
 		start := 0
 		for j in 0..<contour_count {
@@ -150,8 +158,8 @@ parse_ttf :: proc(data: []byte) -> Font {
 			contour_point_count := start_next - start
 
 			// On-curve points are handled by duplicating the second endpoint
-			// TODO: should we really count them?
-			// More ideal would be writing as many as we want into a virtual memory-based growing arena
+			// This is a serial dependence problem, so we need to count the number of actual points first
+			// TODO: instead of counting, use a growing dynamic array with a virtual memory-based arena
 			new_point_count := 0
 			p1 := &contour_points[0]
 			p2 := &contour_points[1]
@@ -205,12 +213,11 @@ parse_ttf :: proc(data: []byte) -> Font {
 					}
 				}
 
-				new_points[l]     = a1.position
-				new_points[l + 1] = a2.position
-				new_points[l + 2] = a3.position
+				new_points[l]     = linalg.array_cast(a1.position, f32)
+				new_points[l + 1] = linalg.array_cast(a2.position, f32)
+				new_points[l + 2] = linalg.array_cast(a3.position, f32)
 				l += 3
 			}
-			assert(l == new_point_count)
 
 			start = start_next
 		}
@@ -221,43 +228,42 @@ parse_ttf :: proc(data: []byte) -> Font {
 	reader.position += 2 // version
 
 	selected_id: u16 = 0
-	selected_offset: u32be = ---
+	selected_offset: u32 = ---
 	ok := false
 
-	subtable_count := u16(read(&reader, u16be))
+	subtable_count := read(&reader, u16)
 	for _ in 0..<subtable_count {
-		id := u16(read(&reader, u16be))
+		id := read(&reader, u16)
 		if id != 0 {
 			reader.position += 2 // platformSpecificID
 			reader.position += 4 // offset
 			continue
 		}
 
-		id = u16(read(&reader, u16be))
+		id = read(&reader, u16)
 		if (id == 0 || id == 1 || id == 3 || id == 4) && (!ok || id > selected_id) {
 			selected_id = id
-			selected_offset = read(&reader, u32be)
+			selected_offset = read(&reader, u32)
 			ok = true
 		} else {
 			reader.position += 4 // offset
 		}
 	}
-
 	if !ok { log.fatal("No unicode character map in TTF data") }
 
 	reader.position = tables.cmap + int(selected_offset)
 
-	format := read(&reader, u16be)
+	format := read(&reader, u16)
 	if format != 12 { log.fatal("Unsupported unicode character map format:", format) }
 
 	reader.position += 2 // reserved
 	reader.position += 4 // length
 	reader.position += 4 // language
 
-	group_count := int(read(&reader, u32be))
+	group_count := read(&reader, u32)
 	for _ in 0..<group_count {
-		chr := u32(read(&reader, u32be))
-		end := u32(read(&reader, u32be))
+		chr := read(&reader, u32)
+		end := read(&reader, u32)
 		glyph := int(read(&reader, u32be))
 
 		for chr <= end {

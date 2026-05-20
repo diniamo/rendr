@@ -113,7 +113,7 @@ worker :: proc(task: thread.Task) {
 		direction := viewport_position - camera_position
 		color := trace_ray(camera_position, direction, 1, data.scene.objects[:], data.scene.lights[:], cache, 1)
 
-		canvas.pixel(data.target, point, color)
+		canvas.pixel_middle(data.target, point, color)
 	}
 }
 
@@ -123,8 +123,8 @@ main :: proc() {
 	s.camera.transform.scale = linalg.matrix4_scale(t.Vector3{f32(VIEWPORT_WIDTH)/f32(CANVAS_WIDTH), f32(VIEWPORT_HEIGHT)/f32(CANVAS_HEIGHT), 1})
 	scene.transform_update(&s.camera.transform)
 
-	target := canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT, OUTPUT_PATH)
-	defer canvas.flush(&target)
+	target := canvas.create(CANVAS_WIDTH, CANVAS_HEIGHT)
+	defer canvas.flush(&target, OUTPUT_PATH)
 
 	// -1 since the main thread is dispatching coordinates
 	worker_count := os.get_processor_core_count() - 1
