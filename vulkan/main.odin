@@ -337,7 +337,7 @@ main :: proc() {
 			stride = size_of(Vertex),
 			inputRate = .VERTEX
 		}
-		// NOTE: the binding fields here to which vertex buffer binding the data comes from,
+		// NOTE: the binding fields here refer to which vertex buffer binding the data comes from,
 		// not the binding you would specify for textures in shader code
 		vertex_attribute_descriptions := [?]vk.VertexInputAttributeDescription{
 			{ binding = 0, location = 0, format = .R32G32_SFLOAT,    offset = 0 },
@@ -402,7 +402,7 @@ main :: proc() {
 		pipeline_create_info := vk.GraphicsPipelineCreateInfo {
 			sType = .GRAPHICS_PIPELINE_CREATE_INFO,
 			pNext = &rendering_create_info,
-			stageCount = 2,
+			stageCount = len(stages),
 			pStages = &stages[0],
 			pVertexInputState = &vertex_input_state,
 			pInputAssemblyState = &input_assembly_state,
@@ -525,9 +525,9 @@ try_device :: proc(physical_device: vk.PhysicalDevice, name: cstring) -> bool {
 			queueCount = 1,
 			pQueuePriorities = &priority
 		}
-		queue_create_infos[0] = {
+		queue_create_infos[1] = {
 			sType = .DEVICE_QUEUE_CREATE_INFO,
-			queueFamilyIndex = renderer.queue.family,
+			queueFamilyIndex = window.queue.family,
 			queueCount = 1,
 			pQueuePriorities = &priority
 		}
@@ -632,7 +632,7 @@ render :: proc(output: vk.Image, output_view: vk.ImageView) {
 	}
 	scissor := vk.Rect2D{extent = size}
 	vk.CmdSetViewport(buffer, 0, 1, &viewport)
-	vk.CmdSetScissor(buffer, 0,1, &scissor)
+	vk.CmdSetScissor(buffer, 0, 1, &scissor)
 
 	subresource_range := vk.ImageSubresourceRange {
 		aspectMask = {.COLOR},
